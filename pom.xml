@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      ===================================================================
+      THE PARENT / AGGREGATOR POM  -  this is the first real difference
+      from the monolith.
+
+      The monolith has ONE pom producing ONE jar.
+      Here the root pom produces NO jar at all: <packaging>pom</packaging>.
+      Its job is to (a) list the modules and (b) hold shared configuration
+      so every service agrees on Java version and Spring Boot version.
+
+      `mvn test` at this level builds every module below in one go.
+      ===================================================================
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.persona</groupId>
+    <artifactId>persona-microservices</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>persona-microservices</name>
+    <description>persona - the same app, split into independently deployable services</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <!--
+      Day-00 has exactly one service. That is deliberate: a "microservice
+      architecture" with one service is still a valid architecture, and it
+      keeps the slice small.
+
+      Later days add siblings here, each its own folder + its own pom:
+        <module>services/profile-service</module>   (later)
+        <module>api-gateway</module>                (Day-17)
+    -->
+    <modules>
+        <module>services/user-service</module>
+    </modules>
+
+</project>
