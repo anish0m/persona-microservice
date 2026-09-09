@@ -1,5 +1,7 @@
 package com.persona.user.model;
 
+import java.util.Optional;
+
 /**
  * A person who can sign up and log in to persona.
  *
@@ -47,6 +49,21 @@ public class User {
      * it may be logged by a gateway or proxy the service does not control.
      */
     private String password;
+
+    /**
+     * A profile picture URL, or {@code null} when none is set. The first field
+     * allowed to be genuinely absent.
+     *
+     * <p>Stored nullable, exposed as {@code Optional} — see {@link #getImage()}.
+     *
+     * <p>Distributed wrinkle: in this architecture the image is likely to live in
+     * object storage owned by another service, so this field is a <em>reference</em>
+     * to something user-service does not control. The URL being present is not a
+     * promise that the image still exists. A monolith can check the file; here you
+     * would need a network call, and by the earlier rule that cannot live in a
+     * setter.
+     */
+    private String image;
 
     /**
      * Delegates to the setters rather than assigning directly, so construction and
@@ -112,6 +129,49 @@ public class User {
     public void setPassword(String password) {
         requireText(password, "Password");
         this.password = password;
+    }
+
+    /**
+     * persona's public handle: {@code @firstname-lastname}, lowercased.
+     *
+     * <p>Derived, not stored. A stored copy is a second place holding the same
+     * truth, and {@code setFirstName} would update one and not the other — the
+     * object then reports a name and a username that disagree.
+     *
+     * <p>Sharper here than in the monolith. A stored username would be replicated
+     * into other services' local caches, and a stale copy in another service's
+     * database cannot be fixed by fixing this class. Derived values do not get
+     * replicated; only the inputs do.
+     */
+    public String getUsername() {
+        return "@" + firstName.toLowerCase() + "-" + lastName.toLowerCase();
+    }
+
+    /**
+     * Returns the image URL, or empty when none is set.
+     *
+     * <p>{@code Optional} as a return type makes absence part of the signature, so
+     * the caller cannot forget the empty case. As a field it would cost an object
+     * per User and would not serialise cleanly — which in a microservice matters
+     * more, because these objects become JSON on the wire.
+     *
+     * <p>Rule of thumb: {@code Optional} as a return type, never as a field, never
+     * as a parameter.
+     */
+    public Optional<String> getImage() {
+        return Optional.ofNullable(image);
+    }
+
+    /**
+     * Accepts {@code null} to clear the image; rejects blank. {@code null} means
+     * "no image"; {@code ""} would be a second value meaning the same thing, and
+     * two representations of one state is exactly the ambiguity to avoid.
+     */
+    public void setImage(String image) {
+        if (image != null && image.isBlank()) {
+            throw new IllegalArgumentException("Image cannot be blank — use null to clear it");
+        }
+        this.image = image;
     }
 
     /**
