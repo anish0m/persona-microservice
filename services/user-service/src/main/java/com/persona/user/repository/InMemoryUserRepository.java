@@ -3,6 +3,7 @@ package com.persona.user.repository;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
+import org.springframework.stereotype.Repository;
 
 import java.util.Collection;
 import java.util.List;
@@ -29,7 +30,22 @@ import java.util.concurrent.ConcurrentHashMap;
  * immediately, while a monolith can limp along on an in-memory store for
  * surprisingly long. Same class, same code, very different expiry date. Worth
  * remembering on Day-17 when the trade-off comes up for real.
+ *
+ * <p>{@code @Repository} makes this a bean and switches on exception translation,
+ * exactly as in the monolith — a vendor {@code PSQLException} becomes Spring's
+ * {@code DataAccessException} before it leaves the class. The annotation is not
+ * interchangeable with {@code @Service} for that reason, even though both merely
+ * "make a bean".
+ *
+ * <p>Here the stakes are slightly higher than in the monolith. An untranslated
+ * database exception escaping this class does not just leak a vendor type into the
+ * service layer; it reaches the controller, which must turn it into an HTTP status
+ * for a <em>different service</em> to interpret. A leaked {@code PSQLException}
+ * usually becomes a 500, and the caller learns only that something broke — the
+ * distinction between "not found" and "database unreachable" is lost at the wire,
+ * where it cannot be recovered.
  */
+@Repository
 public class InMemoryUserRepository {
 
     /**
