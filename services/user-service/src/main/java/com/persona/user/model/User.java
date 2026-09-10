@@ -175,6 +175,56 @@ public class User {
     }
 
     /**
+     * Same person means same email. Same reasoning as the monolith: equality
+     * answers "is this the same person?", not "are these bytes identical?".
+     *
+     * <p><b>The distributed weight.</b> In a monolith, a User object is created
+     * in one place and passed around. Here, the same person arrives as a fresh
+     * object every time — deserialised from a JSON response, rebuilt from a cache
+     * entry, reconstructed from a message on a queue. Object identity is
+     * meaningless across those boundaries; two objects representing one person are
+     * the normal case, not the exception. Without this method, user-service cannot
+     * recognise that a user it just fetched is the user it already had.
+     *
+     * <p>Which is also the warning: equality is now defined by a field that
+     * crosses the network. If another service ever compares users by a different
+     * field, the two services disagree about who is who, and no compiler will say
+     * so. That agreement is a contract, and Day-17 is where contracts between
+     * services stop being free.
+     */
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (other == null || getClass() != other.getClass()) {
+            return false;
+        }
+        return email.equals(((User) other).email);
+    }
+
+    /**
+     * Overridden because {@code equals} is, using the same field. Skipping this
+     * breaks every hash-based collection: a {@code HashSet} picks a bucket by hash
+     * and only then calls {@code equals}, so two equal Users with different hashes
+     * land in different buckets and {@code contains} never finds the match.
+     *
+     * <p>Note what is <em>not</em> guaranteed here: {@code String.hashCode} is
+     * stable within a JVM run and across JVMs for a given Java version, but it is
+     * not a cross-service protocol. Never send a hash code over the wire and
+     * expect another service to reproduce it — send the email. Hash codes are for
+     * in-memory bucketing, nothing more.
+     *
+     * <p>{@code email} is {@code final}, so the hash cannot change while the
+     * object sits in a map. A mutable key silently becomes unreachable — still in
+     * the map, never found again.
+     */
+    @Override
+    public int hashCode() {
+        return email.hashCode();
+    }
+
+    /**
      * Excludes the password — logs, stack traces and debugger views must never
      * see a credential.
      */
