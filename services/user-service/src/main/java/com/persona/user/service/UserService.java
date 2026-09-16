@@ -3,91 +3,89 @@ package com.persona.user.service;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
-import com.persona.user.repository.InMemoryUserRepository;
+import com.persona.user.repository.UserRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.Collection;
 import java.util.Optional;
 
 /**
- * Business rules for the user domain — and, in this architecture, <b>only</b> the
- * user domain.
+ * Business rules for the user domain.
  *
- * <p>Method-for-method identical to the monolith's {@code com.persona.service}
- * today, which is the honest starting position: a microservice is not a different
- * way of writing a class, it is a different way of drawing a boundary around one.
- * Everything interesting about that difference is invisible until this service
- * needs something it does not own.
+ * <p>This class is the first one in the project that exists purely because of
+ * layering. The model validates itself, the repository stores things, and between
+ * signing up and being stored there is a set of decisions belonging to neither:
+ * whether this signup is allowed at all. That is what lives here.
  *
- * <p><b>Where the two architectures part company.</b> Suppose registration must
- * also open a wallet. In the monolith that is one injected bean and one method
- * call: in-process, microseconds, inside a single {@code @Transactional} block, so
- * a failure anywhere rolls the whole thing back. Here it is a network call to
- * another service, and each of those properties is lost:
+ * <p><b>What this class must never learn.</b> No {@code HttpServletRequest}, no
+ * status codes, no JSON, no {@code @RequestMapping}. If HTTP disappeared tomorrow
+ * and persona were driven from a command line or a scheduled import, every method
+ * below would still be correct and still be called. That is the test for whether
+ * a rule belongs here rather than in the controller — not importance, but whether
+ * it survives the transport being replaced.
  *
- * <ul>
- *   <li><b>It can be slow.</b> A method call has no timeout because it cannot hang
- *       independently. A network call needs one, and choosing it is a real
- *       decision.</li>
- *   <li><b>It can fail on its own.</b> The user is saved, wallet creation times
- *       out, and now the two services disagree about reality. Nothing rolled
- *       back.</li>
- *   <li><b>It can fail ambiguously.</b> A timeout does not tell you whether the
- *       other side did the work. Retrying might duplicate it — which is why
- *       Day-11 is about idempotency, and why it is a microservice topic rather
- *       than a monolith one.</li>
- * </ul>
- *
- * <p>That single substitution — method call becomes network call — is the source
- * of most of Days 10-15. It is worth noticing that the monolith gets all three
- * guarantees for free and this service must buy each one back with code.
- *
- * <p>The rule from the monolith still holds unchanged: no {@code HttpServletRequest},
- * no status codes, no JSON. HTTP is how this service is reached, not what it is.
+ * <p>It also does not know <em>where</em> users are stored. It holds an
+ * {@code InMemoryUserRepository} today and a PostgreSQL-backed one from Day-03,
+ * and the intent is that this file does not change when that happens.
  */
 @Service
 public class UserService {
 
     /**
-     * {@code final} because this bean is a singleton shared by every concurrent
-     * request — a reassignable field could be swapped mid-flight, leaving some
-     * requests on the old repository and some on the new, with no exception and no
-     * reproducible failure. Note this is a different danger from {@code User.email}
-     * being {@code final}, which was about a hash key moving between buckets.
-     * Same keyword, unrelated reasons.
+     * Injected through the constructor, and {@code final} for a reason worth
+     * separating from the other {@code final}s in this project.
+     *
+     * <p>{@code User.email} is {@code final} because it is a hash key and a moving
+     * key gets lost in its bucket. That is not the danger here — nobody hashes a
+     * repository. This field is {@code final} because {@link UserService} is a
+     * <b>singleton</b>: Spring builds one instance and every concurrent request
+     * shares it. A reassignable field on a shared object can be swapped while
+     * requests are mid-flight, so some see the old repository and some the new,
+     * with no exception and no reproducible failure — only wrong answers. Being
+     * {@code final} makes that impossible to express rather than merely agreed.
      */
-    private final InMemoryUserRepository repository;
+    private final UserRepository repository;
 
     /**
-     * Constructor injection, no {@code @Autowired} needed — one constructor means
-     * Spring has nothing to choose between.
+     * Constructor injection, with no {@code @Autowired} — a class with exactly one
+     * constructor needs none, because Spring has nothing to choose between.
      *
-     * <p>The testability argument is worth more here than in the monolith. Booting
-     * a Spring context costs a second or two; in a microservice architecture there
-     * are many services, each with its own suite, and a habit of testing through
-     * the framework compounds across all of them. Being able to write
-     * {@code new UserService(new InMemoryUserRepository())} keeps that cost at
-     * zero.
+     * <p>Three things follow from injecting here rather than annotating the field.
+     * The field can be {@code final}, per above. The object is never half-built:
+     * there is no window in which a {@code UserService} exists with a {@code null}
+     * repository. And this class stays testable without Spring at all —
+     * {@code new UserService(new InMemoryUserRepository())} is a valid line in a
+     * plain JUnit test, which is why the tests for this class run in milliseconds
+     * and need no application context.
      */
-    public UserService(InMemoryUserRepository repository) {
+    public UserService(UserRepository repository) {
         this.repository = repository;
     }
 
     /**
      * Registers a new user.
      *
-     * <p>The duplicate check is policy — it decides a taken email means rejection,
-     * and it exists so the caller gets a deliberate error rather than whatever
-     * storage happens to throw. It is <em>not</em> the guarantee, and here the
-     * reason is starker than in the monolith: the race is not between two threads
-     * in one JVM but between <b>separate instances of this service on separate
-     * machines</b>. No Java lock spans them. No {@code synchronized}, no
-     * {@code ConcurrentHashMap}, nothing in this file can help.
+     * <p>The duplicate check below looks redundant — {@code InMemoryUserRepository}
+     * already throws on a taken key. It is not redundant, but nor is it what makes
+     * the system correct, and the distinction matters:
      *
-     * <p>From Day-03 the sole real guarantee is a {@code UNIQUE} constraint in
-     * PostgreSQL — the one thing all instances share, and therefore the only place
-     * the rule can actually be enforced. <b>Never let the only copy of a
-     * correctness guarantee live in application code.</b>
+     * <ul>
+     *   <li><b>This check is policy.</b> It decides that a taken email means
+     *       rejection, and it exists so the caller gets a clean, deliberate error
+     *       instead of whatever the storage layer happens to throw. Policy can
+     *       change — a later persona might allow reusing the email of a
+     *       soft-deleted account — and when it does, it changes here.</li>
+     *   <li><b>The storage constraint is the guarantee.</b> Both this check and the
+     *       repository's are look-then-act, and both lose the same race: two
+     *       threads read "free" before either writes. Moving the check between
+     *       layers does not make it atomic. From Day-03 the real guarantee is a
+     *       {@code UNIQUE} constraint in PostgreSQL, which cannot be raced because
+     *       the database serialises it.</li>
+     * </ul>
+     *
+     * <p>Which is the rule to carry forward: <b>never let the only copy of a
+     * correctness guarantee live in application code.</b> Application code races.
+     * Constraints do not. The check here buys a good error message, not safety.
      */
     public User register(User user) {
         if (repository.findByEmail(user.getEmail()).isPresent()) {
@@ -99,27 +97,21 @@ public class UserService {
     /**
      * Looks a user up, tolerating absence.
      *
-     * <p>{@code Optional} because absence is not always an error — "is this email
-     * free?" expects to find nothing most of the time.
-     *
-     * <p>This method is a likely candidate for being called by another service one
-     * day, and when that happens the {@code Optional} does not survive the trip: it
-     * flattens to a 200 or a 404, and the caller rebuilds the distinction from the
-     * status code. The meaning is preserved by agreement, not by the compiler —
-     * which is the recurring cost of a network boundary.
+     * <p>Returns {@code Optional} rather than throwing because <b>absence is not
+     * always an error</b>. A signup form asking "is this email free?" expects to
+     * find nothing most of the time; that is a normal answer, and an exception for
+     * a normal answer is control flow wearing a disguise.
      */
     public Optional<User> findByEmail(String email) {
         return repository.findByEmail(email);
     }
 
     /**
-     * Loads a user who must exist, throwing {@link UserNotFoundException} otherwise.
+     * Loads a user who must exist, throwing {@link UserNotFoundException} if not.
      *
-     * <p>The exception cannot cross the wire either. Day-09 turns it into a 404 and
-     * a remote caller reconstructs "not found" from that number. Which is why the
-     * exception carries {@code getEmail()} as data rather than only inside its
-     * message — the controller builds the response from a field, never by parsing
-     * English out of a string.
+     * <p>For callers that cannot sensibly continue without the user — loading a
+     * profile for a logged-in session, say. Forcing such a caller to unwrap an
+     * {@code Optional} only makes it write an {@code if} it has no answer for.
      */
     public User getByEmail(String email) {
         return repository.getByEmail(email);
@@ -128,16 +120,23 @@ public class UserService {
     /**
      * Deletes a user, throwing if there was nothing to delete.
      *
-     * <p>Trivial today. In this architecture it is the method most likely to grow
-     * complicated first: deleting a user here leaves whatever other services hold
-     * about that user untouched, and no database constraint spans service
-     * boundaries to notice. That is the eventual-consistency problem in miniature,
-     * and Day-14 meets it properly.
+     * <p>A thin pass-through today. It exists anyway rather than letting the
+     * controller reach past this class to the repository, because the moment
+     * deletion grows a rule — refuse while a balance is outstanding, archive before
+     * removing, emit an event — that rule has an obvious home. A layer that is
+     * only added once it is needed tends to get skipped exactly when it is.
      */
     public void deleteByEmail(String email) {
         repository.deleteByEmail(email);
     }
 
+    /**
+     * Every registered user.
+     *
+     * <p>Harmless at this size and a mistake at scale — Day-07 replaces it with
+     * pagination, once there is a database that can offer a page without loading
+     * everything first.
+     */
     public Collection<User> findAll() {
         return repository.findAll();
     }

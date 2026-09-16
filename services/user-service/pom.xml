@@ -33,6 +33,83 @@
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+          Day-03. JDBC, a connection pool (HikariCP), JdbcClient, and Spring's
+          DataSource auto-configuration. NOT spring-boot-starter-data-jpa — there
+          is no Hibernate here, no @Entity, no magic. We write the SQL.
+
+          That is deliberate. Day-04 adds JPA, and it should arrive as a
+          labour-saving device over something already understood, not as the
+          only way you have ever seen a row reach an object.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!--
+          The PostgreSQL driver: the code that actually speaks Postgres's wire
+          protocol over a socket. <scope>runtime</scope> because nothing we write
+          imports org.postgresql — we compile against java.sql interfaces, and
+          the driver is only needed when the program runs.
+
+          That scope is the three-layer rule expressed in the build file: if this
+          were <scope>compile</scope>, nothing would STOP a class from importing
+          the vendor directly.
+        -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+          Flyway. Versioned, ordered, immutable SQL migrations that run
+          automatically at startup.
+
+          The alternative is a human typing CREATE TABLE into a terminal once,
+          which means the schema exists only in production and in that person's
+          memory. With Flyway the schema is CODE: in git, reviewed, and identical
+          on every machine. It records each applied migration in a
+          flyway_schema_history table, so running the app twice does not run the
+          migration twice.
+
+          flyway-database-postgresql is a separate artifact since Flyway 10 —
+          the core no longer bundles per-database support.
+        -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <!--
+          SPRING BOOT 4 CHANGE, and it cost real debugging time.
+
+          In Boot 3, flyway-core on the classpath was enough: the auto-
+          configuration lived in the single spring-boot-autoconfigure jar and
+          switched itself on. Boot 4 split that jar into per-technology modules,
+          so FlywayAutoConfiguration now ships in spring-boot-flyway.
+
+          The failure mode is what makes this worth a comment. Nothing errored.
+          Flyway was on the classpath, the migration was on the classpath, and
+          the application started perfectly — it simply never ran the migration
+          and never logged a word about it. The symptom appeared one layer away
+          as  relation "users" does not exist.
+
+          How it was found: the classpath was searched for the class itself
+          (unzip -l over every spring-boot jar) rather than trusting that the
+          dependency being present meant the feature was active. Worth
+          remembering — "the jar is there" and "the auto-configuration exists"
+          are different claims.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
+
     </dependencies>
 
     <build>
@@ -45,6 +122,32 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+              Surefire runs *Test by default and ignores *IT. That default is
+              good — it keeps `mvn test` fast and free of infrastructure — but
+              it means JdbcUserRepositoryIT would never run at all.
+
+              So we add *IT to the includes, and the class itself carries
+              @EnabledIfSystemProperty(named = "it", matches = "true"). The
+              result:
+
+                  mvn test              30 fast tests, no database needed
+                  mvn test -Dit=true    those plus the real SQL against Postgres
+
+              The guard lives in the test rather than in a Maven profile so that
+              the reason it skipped is visible in the test report, instead of the
+              class silently not existing.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Test.java</include>
+                        <include>**/*IT.java</include>
+                    </includes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
