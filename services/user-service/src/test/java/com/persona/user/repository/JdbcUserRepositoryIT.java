@@ -49,7 +49,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * already has Flyway, JDBC and SQL in it.
  */
 @SpringBootTest
-@ActiveProfiles("jdbc-it")
+/*
+ * DAY-04 CHANGE — two profiles now, where one used to be enough.
+ *
+ * This said @ActiveProfiles("jdbc-it") while JdbcUserRepository was
+ * @Profile("!test"): the bean matched because "jdbc-it" is not "test", which was
+ * true by accident rather than by intent. Now that the implementation names
+ * itself positively as "jdbc", the profile that SELECTS the bean and the profile
+ * that CONFIGURES the datasource are two different things and both must be named.
+ *
+ *     jdbc     -> selects JdbcUserRepository           (the bean)
+ *     jdbc-it  -> loads application-jdbc-it.properties (the database)
+ *
+ * The old form worked as long as nobody looked at it. That is the recurring
+ * hazard of negations: they are satisfied by everything not yet invented.
+ */
+@ActiveProfiles({"jdbc", "jdbc-it"})
 @EnabledIfSystemProperty(named = "it", matches = "true")
 class JdbcUserRepositoryIT {
 

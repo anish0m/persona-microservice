@@ -2,21 +2,78 @@ package com.persona.user.model;
 
 import java.util.Optional;
 
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
 /**
  * A person who can sign up and log in to persona.
- *
- * <p>This is a plain Java object. Notice what is NOT here:
- * no Spring annotation, no {@code @Entity}, no JSON annotation, no SQL.
- * The model layer is the one layer that depends on nothing, which is exactly
- * why every other layer is allowed to depend on it. Add a framework annotation
- * here and that property is gone.
  *
  * <p>Encapsulation: every field is {@code private}. Nothing outside this class
  * can reach in and change state directly. The only way in is a constructor or a
  * setter — and a setter is a method, which means it is a place where a rule can
  * later be enforced. A public field has no such place. That is the whole reason
  * for the ceremony; it is not decoration.
+ *
+ * <h2>Day-04 — this class is now an entity, and that cost something</h2>
+ *
+ * <p>Until today the class documentation opened by pointing at what was NOT
+ * here: no Spring annotation, no {@code @Entity}, no SQL. The model was the one
+ * layer that depended on nothing, which was exactly why every other layer was
+ * allowed to depend on it. <b>That claim is no longer true</b>, and pretending
+ * otherwise would be worse than the change itself.
+ *
+ * <p>What was actually traded:
+ * <ul>
+ *   <li><b>{@code email} lost its {@code final}.</b> Hibernate constructs an
+ *       entity empty and fills the fields by reflection, so a final field is
+ *       officially unsupported — reflection can usually write one, but the JVM
+ *       is free to constant-fold a value it believes fixed. "Works until the JIT
+ *       optimises it" is the worst failure mode available, so this is not a risk
+ *       worth carrying. See {@link #email}.</li>
+ *   <li><b>A no-arg constructor exists.</b> {@code protected}, so the framework
+ *       can reach it and application code cannot. See {@link #User()}.</li>
+ *   <li><b>The class cannot be {@code final}</b>, nor its getters, because lazy
+ *       loading hands back a generated subclass.</li>
+ * </ul>
+ *
+ * <p>The honest summary: <b>JPA asks an object to weaken its design so that a
+ * framework can populate it.</b> The alternative — a separate {@code UserEntity}
+ * mirroring this class, mapped back and forth — keeps the model pristine and
+ * costs a duplicate class plus a mapper that will drift. For an application this
+ * size that trade is not worth it. On something larger, or a domain with real
+ * invariants to protect, it frequently is. What matters is knowing a trade was
+ * made, rather than discovering later that the model layer quietly acquired a
+ * dependency on Hibernate.
+ *
+ * <p>What did NOT change: every validation rule, {@code getUsername()} still
+ * derived, {@code equals}/{@code hashCode} still on email, {@code toString}
+ * still omitting the password. JPA maps state; it has no opinion about behaviour.
+ *
+ * <h2>And in a microservice, one extra rule</h2>
+ *
+ * <p>This entity may only describe tables <b>this service owns</b>. That sounds
+ * obvious and is the single easiest boundary to destroy, because JPA makes
+ * crossing it pleasant: adding {@code @ManyToOne Wallet wallet} here would
+ * compile, generate a join, and work perfectly — against a database that, after
+ * Day-17, belongs to a different service.
+ *
+ * <p>The annotation cannot tell you the architecture is wrong. A foreign key is
+ * a statement that two tables live in one database; an object reference is a
+ * statement that two classes live in one process. In a monolith those are both
+ * true and the mapping is free. Here, each one is a decision to merge two
+ * services back together, taken one annotation at a time.
+ *
+ * <p>So the rule for this file, from today onward: <b>entities stop at the
+ * service boundary; across it there are ids and HTTP calls, not references.</b>
+ * The monolith's copy of this class carries no such warning, and that difference
+ * — not the mapping, which is byte-identical — is the real divergence of Day-04.
  */
+@Entity
+@Table(name = "users")
 public class User {
 
     /**
@@ -46,7 +103,32 @@ public class User {
      * <p>There is no setter. Nothing in the application may assign an id — the
      * repository sets it through the package-private {@link #assignId} below, at
      * the one moment it is legitimate.
+     *
+     * <p><b>Day-04.</b> {@code @GeneratedValue(strategy = IDENTITY)} does not
+     * decide anything — it REPEATS what V1 already decided with
+     * {@code GENERATED ALWAYS AS IDENTITY}. The annotation and the migration are
+     * two statements of one fact, and {@code ddl-auto: validate} is what makes
+     * them fail loudly at startup when they disagree.
+     *
+     * <p>{@code GenerationType.AUTO} is the trap here: it looks database-agnostic
+     * and on PostgreSQL it silently picks {@code SEQUENCE}, which this schema does
+     * not have. Never leave AUTO on when Flyway owns the DDL.
+     *
+     * <p>The cost of IDENTITY, worth knowing rather than acting on: Hibernate
+     * cannot know the id until the INSERT has run, so it must send every INSERT
+     * immediately and <b>batching is disabled for this entity</b>. A hundred
+     * users is a hundred round trips. {@code SEQUENCE} fetches ids up front and
+     * can batch. It does not matter for a signup table, where inserts arrive one
+     * human at a time; it would matter for a high-volume append-only table.
+     *
+     * <p>And the nullability above is now load-bearing in a second way:
+     * {@code save()} is an upsert that dispatches on this field. Null means
+     * persist (INSERT), non-null means merge (UPDATE). A primitive {@code long}
+     * would make every new object look like an update of row 0.
      */
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "id")
     private Long id;
 
     /**
@@ -57,21 +139,94 @@ public class User {
      * Application servers drift, run in different timezones, and there may be
      * several of them; the database is one clock. For a record of when something
      * happened, one slightly-wrong clock beats several disagreeing ones.
+     *
+     * <p><b>Day-04 — {@code updatable = false} is "no setter", enforced a second
+     * time.</b> This field already had no setter, so application code could not
+     * overwrite what the database stamped. That is no longer sufficient on its
+     * own: dirty checking compares a managed entity against its load-time
+     * snapshot and writes anything that differs, without anyone calling
+     * {@code save()}. {@code updatable = false} removes the column from every
+     * generated UPDATE permanently. Ownership stated in Java AND in the mapping.
+     *
+     * <p><b>{@code insertable = false} is the half that was missed first, and the
+     * failure is worth keeping.</b> With only {@code nullable = false} the first
+     * INSERT failed:
+     *
+     * <pre>
+     * org.hibernate.PropertyValueException: not-null property references a null
+     * or transient value for entity com.persona.model.User.createdAt
+     * </pre>
+     *
+     * <p>V1 says {@code created_at TIMESTAMPTZ NOT NULL DEFAULT now()} — the
+     * DATABASE supplies this value. But {@code nullable = false} made Hibernate
+     * check the field in Java BEFORE sending the statement, and a freshly
+     * constructed User has no timestamp yet, so it refused. The default never got
+     * the chance to apply. {@link com.persona.user.repository.JdbcUserRepository} never
+     * hit this because its hand-written INSERT simply does not name the column.
+     *
+     * <p>{@code insertable = false} says "omit this column from INSERT entirely",
+     * which is precisely what lets {@code DEFAULT now()} do its job. The pair
+     * together — neither inserted nor updated — is the mapping for <b>a value this
+     * application reads and never writes.</b>
+     *
+     * <p>The general shape, and it is the recurring one: <b>an annotation is a
+     * claim about the schema, and two correct-looking claims can still describe a
+     * column nobody is allowed to write.</b> The Java-side check and the SQL-side
+     * default were each individually right and jointly wrong.
+     *
+     * <p>Consequence, deliberately accepted: after {@code save()} the in-memory
+     * object's {@code createdAt} is whatever it was before — Hibernate did not
+     * send the column, so it does not know what the database chose. Reading it
+     * back requires a refresh, which {@link com.persona.user.repository.JpaUserRepository#save}
+     * does. Day-03's {@code RETURNING} clause solved the same problem explicitly;
+     * here it is a flush plus a refresh.
      */
+    @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private java.time.Instant createdAt;
 
     /**
-     * Chosen at construction and never changed afterwards, so it is {@code final}
-     * and has no setter. The compiler now enforces that promise — a future
-     * {@code setEmail} cannot be added by accident, only deliberately.
+     * Email is persona's identity: it is what a person logs in with, and it is
+     * what makes two User objects "the same person". Slice 4 builds
+     * equals/hashCode on this field for that reason.
      *
-     * <p>Email is persona's identity: it is what a person logs in with, and it is
-     * what makes two User objects "the same person". Slice 4 builds equals/hashCode
-     * on this field for that reason.
+     * <p><b>Day-04 — this field WAS {@code final}, and JPA took that away.</b>
+     * The reason it was final, from slice 2, remains completely correct: identity
+     * must not change, and a mutable field behind {@code hashCode} is a live trap
+     * (mutate a key while it sits in a HashMap and the entry becomes permanently
+     * unreachable — see {@link #hashCode()}). The compiler enforced that promise
+     * for free.
+     *
+     * <p>Hibernate cannot live with it. It builds the object through the no-arg
+     * constructor and assigns fields by reflection; reflection can usually write
+     * a final field, but the JVM is entitled to treat a final as a constant and
+     * fold it, so the mapping is officially unsupported and fails unpredictably
+     * rather than immediately. An unsupported thing that works today is worse
+     * than one that fails today.
+     *
+     * <p><b>What replaces the guarantee.</b> Not nothing, and not merely a
+     * comment:
+     * <ul>
+     *   <li>there is still <b>no setter</b> — the only way to change it is to add
+     *       a method, which is a deliberate act, not an accident;</li>
+     *   <li>{@code updatable = false} means Hibernate will never write this
+     *       column in an UPDATE, so even dirty checking cannot change a stored
+     *       email;</li>
+     *   <li>{@code UNIQUE} in V1 remains the actual guarantee that two people
+     *       cannot share one.</li>
+     * </ul>
+     *
+     * <p>This is the day's trade in one field: <b>a compile-time guarantee
+     * downgraded to a runtime one, in exchange for the framework being able to
+     * construct the object at all.</b> Worth feeling rather than skipping past —
+     * the mapping is not free, and this is what it cost.
      */
-    private final String email;
+    @Column(name = "email", nullable = false, unique = true, length = 255, updatable = false)
+    private String email;
 
+    @Column(name = "first_name", nullable = false, length = 100)
     private String firstName;
+
+    @Column(name = "last_name", nullable = false, length = 100)
     private String lastName;
 
     /**
@@ -79,7 +234,16 @@ public class User {
      * with a BCrypt hash and this field becomes {@code passwordHash}. It is named
      * plainly today so that the change on Day-06 is visible and deliberate rather
      * than silent.
+     *
+     * <p><b>Day-04 note on mapping being opt-OUT.</b> Nothing here says "persist
+     * this" — every non-static, non-transient field is mapped by default. So this
+     * field is stored because it was not excluded, not because it was chosen. A
+     * field that must never reach the database takes {@code @Transient} (the JPA
+     * annotation, meaning "not for the database" — not the Java {@code transient}
+     * keyword, which means "not for serialization"). Worth knowing precisely here,
+     * because this is the field most likely to be reached for on Day-06.
      */
+    @Column(name = "password", nullable = false, length = 255)
     private String password;
 
     /**
@@ -96,13 +260,42 @@ public class User {
      * serialise cleanly, and adds nothing: the field is private, so the only way
      * anyone reads it is through the getter, which is where the protection needs
      * to be anyway.
+     *
+     * <p>The one nullable column in the table, so the one {@code @Column} here
+     * without {@code nullable = false}. The absence is genuine and the schema,
+     * the field and {@link #getImage()}'s {@code Optional} all say the same thing.
      */
+    @Column(name = "image", length = 512)
     private String image;
 
     /**
-     * The only constructor. There is no no-arg constructor on purpose: a User
-     * without an email is not a meaningful User, and leaving the no-arg form out
-     * makes that unrepresentable rather than merely discouraged.
+     * For Hibernate only. <b>Day-04.</b>
+     *
+     * <p>Reading a row means producing a User <em>before</em> the values are
+     * known: Hibernate creates an empty instance and then assigns each field by
+     * reflection. It cannot use the constructor below — it has no idea which
+     * column maps to which parameter, and that constructor validates, which would
+     * re-judge data already stored on its way back out.
+     *
+     * <p>{@code protected} rather than {@code public} is the whole point. The
+     * framework can reach it; application code cannot, so
+     * {@code new User()} still does not compile anywhere in this project and "a
+     * User without an email is unrepresentable" survives almost intact. Almost:
+     * the door exists now, it is just not one the application can open.
+     *
+     * <p>A private one would work for Hibernate too, but not for the lazy-loading
+     * proxy, which is a generated SUBCLASS and therefore needs a constructor it
+     * can call via {@code super()}. {@code protected} is the smallest opening
+     * that satisfies both.
+     */
+    protected User() {
+        // Deliberately empty. Hibernate assigns the fields directly afterwards.
+    }
+
+    /**
+     * The only constructor the application may use. There is no PUBLIC no-arg
+     * form on purpose: a User without an email is not a meaningful User, and
+     * leaving that out makes it unrepresentable rather than merely discouraged.
      *
      * <p>Note it delegates to the setters rather than assigning directly. Both
      * routes into a field — construction and later mutation — then run the same

@@ -34,8 +34,25 @@ import java.util.Optional;
  * and converts checked {@link SQLException}s — none of which is the interesting
  * part. The interesting part is that every query here is parameterised.
  */
+/*
+ * DAY-04 CHANGE — this was @Profile("!test") until a third implementation existed.
+ *
+ * "Not test" was a perfectly good way to say "the real one" while there was
+ * exactly one real one. The moment JpaUserRepository arrived, "!test" and "jpa"
+ * both matched outside tests, giving two candidates for one injection point and
+ * NoUniqueBeanDefinitionException at startup.
+ *
+ * Which is the good failure: loud, at boot, naming both beans. Compare Day-03's
+ * mirror image, where a MISSING `implements UserRepository` compiled fine and
+ * produced NoSuchBeanDefinitionException at startup instead. Too few and too many
+ * both fail the same way, and that is the container earning its keep.
+ *
+ * The lesson is about the negation, not about the fix: @Profile("!x") encodes an
+ * assumption about how many alternatives will ever exist. All three now name
+ * themselves positively — test, jdbc, jpa — so adding a fourth breaks nothing.
+ */
 @Repository
-@Profile("!test")
+@Profile("jdbc")
 public class JdbcUserRepository implements UserRepository {
 
     /**

@@ -48,6 +48,28 @@
         </dependency>
 
         <!--
+          Day-04. JPA — and note that this dependency is IDENTICAL to the
+          monolith's. Persistence is the layer where the two architectures agree
+          most completely: an entity is an entity, and Hibernate does not know or
+          care how many services are deployed.
+
+          Where they will diverge is Day-17, and it is worth naming now: in a
+          microservice, an @Entity may only describe tables THIS service owns.
+          The moment a Wallet entity here holds a @ManyToOne to a User owned by
+          another service, the object graph crosses a database boundary that does
+          not exist — and JPA will happily let you write it. The annotation
+          cannot tell you that your architecture is wrong.
+
+          Brings Hibernate 7 (implementation), Jakarta Persistence (spec) and
+          Spring Data JPA (convenience). Still spring-boot-starter-data-jpa in
+          Boot 4 — this one was NOT renamed, unlike -web -> -webmvc.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!--
           The PostgreSQL driver: the code that actually speaks Postgres's wire
           protocol over a socket. <scope>runtime</scope> because nothing we write
           imports org.postgresql — we compile against java.sql interfaces, and
