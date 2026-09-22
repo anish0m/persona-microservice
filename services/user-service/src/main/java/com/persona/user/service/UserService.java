@@ -1,10 +1,14 @@
 package com.persona.user.service;
 
+import com.persona.user.dto.CreateUserRequest;
+import com.persona.user.dto.UpdateProfileRequest;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import com.persona.user.repository.UserRepository;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 import java.util.Optional;
@@ -47,6 +51,23 @@ public class UserService {
     private final UserRepository repository;
 
     /**
+     * The hashing algorithm, injected as the <b>interface</b> rather than as
+     * {@code BCryptPasswordEncoder}.
+     *
+     * <p>Which is the same discipline as depending on {@code UserRepository}
+     * instead of {@code JdbcUserRepository}: this class must know that passwords
+     * are hashed, and must not know how. Moving to argon2 then changes
+     * {@code SecurityConfig} and nothing else.
+     *
+     * <p>It also means a test can inject a trivially fast encoder without a
+     * Spring context — the property that keeps {@code UserServiceTest} at
+     * milliseconds rather than seconds.
+     */
+    private final PasswordEncoder passwordEncoder;
+
+
+
+    /**
      * Constructor injection, with no {@code @Autowired} — a class with exactly one
      * constructor needs none, because Spring has nothing to choose between.
      *
@@ -58,8 +79,9 @@ public class UserService {
      * plain JUnit test, which is why the tests for this class run in milliseconds
      * and need no application context.
      */
-    public UserService(UserRepository repository) {
+    public UserService(UserRepository repository, PasswordEncoder passwordEncoder) {
         this.repository = repository;
+        this.passwordEncoder = passwordEncoder;
     }
 
     /**
@@ -86,12 +108,136 @@ public class UserService {
      * <p>Which is the rule to carry forward: <b>never let the only copy of a
      * correctness guarantee live in application code.</b> Application code races.
      * Constraints do not. The check here buys a good error message, not safety.
+     *
+     * <h2>Day-05 — why the parameter is a DTO and not a User</h2>
+     *
+     * <p>This signature used to be {@code register(User)}, and the controller
+     * built the {@code User}. The change is not a tidy-up; it removes a question
+     * that had no reliable answer.
+     *
+     * <p>{@code register(User)} cannot distinguish a {@code User} assembled from
+     * an untrusted request body from one Hibernate just loaded out of the
+     * database. The first carries a plaintext password that <b>must</b> be
+     * hashed; the second carries a hash that <b>must not</b> be hashed again —
+     * doing so locks the account permanently, silently, with no error anywhere.
+     * The type cannot say which it is holding, so a human has to remember, and
+     * that is the bug.
+     *
+     * <p>A {@link CreateUserRequest} is only ever constructed from a request
+     * body, so its password is only ever plaintext. The question stops being
+     * askable rather than being answered carefully. <b>A type is a cheaper
+     * guarantee than a check.</b>
+     *
+     * <h2>Why the hashing is here and nowhere else</h2>
+     *
+     * <ul>
+     *   <li><b>Not in the controller.</b> Hashing is not a transport concern.
+     *       Put it there and the Day-09 admin import, and anything else that is
+     *       not an HTTP request, silently stores plaintext.</li>
+     *   <li><b>Not in {@code User}.</b> The model would need a
+     *       {@code PasswordEncoder}, and a domain class holding a Spring bean
+     *       can no longer be built in a plain unit test.</li>
+     *   <li><b>Here</b>, because this is the one method that knows a signup is
+     *       happening — which is exactly when a plaintext password exists and is
+     *       the last moment it may.</li>
+     * </ul>
+     *
+     * <p>Note the ordering below is load-bearing: the plaintext is encoded
+     * <em>before</em> the {@code User} is constructed, so no {@code User} object
+     * ever holds a plaintext password, not even transiently. Had the {@code User}
+     * been built first and the field set afterwards, there would be a window in
+     * which a plaintext password is one {@code toString} or one exception away
+     * from a log file.
      */
-    public User register(User user) {
-        if (repository.findByEmail(user.getEmail()).isPresent()) {
-            throw new DuplicateEmailException(user.getEmail());
+    public User register(CreateUserRequest request) {
+        if (repository.findByEmail(request.email()).isPresent()) {
+            throw new DuplicateEmailException(request.email());
         }
-        return repository.save(user);
+
+        String hash = passwordEncoder.encode(request.password());
+
+        return repository.save(new User(
+                request.email(),
+                request.firstName(),
+                request.lastName(),
+                hash));
+    }
+
+    /**
+     * Edits the mutable parts of a profile. <b>Day-05.</b>
+     *
+     * <p>{@link UpdateProfileRequest} carries three fields and cannot express a
+     * change to the email, the password or the id. That is the defence: not a
+     * check that those fields are absent, but a type in which they do not exist.
+     * See that record for why each exclusion is not negotiable.
+     *
+     * <h2>Why there is no save() call</h2>
+     *
+     * <p>Under the JPA repository this method is running inside a transaction, so
+     * the {@code User} returned by {@code getByEmail} is <b>managed</b>: it lives
+     * in the persistence context, Hibernate holds a snapshot of it, and at commit
+     * it compares the object to that snapshot and writes an UPDATE for whatever
+     * differs. The setter <em>is</em> the write. Day-04 proved this with a test
+     * that mutated a field, called no {@code save}, and then read the row back
+     * with raw SQL.
+     *
+     * <p>Calling {@code save} anyway would not be wrong, merely redundant — and
+     * it would teach the wrong model of what is happening.
+     *
+     * <p><b>{@code @Transactional} is what makes any of that true.</b> Without it
+     * there is no persistence context spanning the method, the setters run
+     * against a detached object, and nothing is written — <em>silently</em>, with
+     * a green test if the test asserts on the returned object rather than on the
+     * database. That is the fifth appearance of this project's recurring failure
+     * mode, and the reason {@code UserServiceIT} reads the row back with
+     * {@code JdbcClient} rather than asking Hibernate.
+     *
+     * <p>Note the annotation is <b>not</b> conditional on which repository is
+     * active. Under the JDBC implementation it is harmless: the repository's own
+     * write is a single statement and already atomic. Correct under both, which
+     * is the property that has kept this class unchanged since Day-01.
+     *
+     * <h2>What is quietly working here</h2>
+     *
+     * <ul>
+     *   <li>{@code getByEmail} throws rather than returning {@code Optional},
+     *       because absence <em>is</em> an error for an update even though it is
+     *       not for a lookup. Slice 4's rule.</li>
+     *   <li>{@code setFirstName} still runs {@code requireText}, so even with the
+     *       DTO's {@code @NotBlank} removed the object refuses the invalid
+     *       state.</li>
+     *   <li>{@code getUsername()} needs no code at all. It is derived from the
+     *       two names with no backing field, so it cannot go stale — slice 3
+     *       paying out.</li>
+     * </ul>
+     */
+    @Transactional
+    public User updateProfile(String email, UpdateProfileRequest request) {
+        User user = repository.getByEmail(email);
+
+        user.setFirstName(request.firstName());
+        user.setLastName(request.lastName());
+        user.setImage(request.image());
+
+        // update(), NOT save().
+        //
+        // Calling save() here was the first attempt and it failed immediately:
+        // save() means INSERT, and every implementation rejects an email that
+        // already exists. The fix was NOT to relax save() into an upsert —
+        // that check is the duplicate-signup guarantee, and weakening it to
+        // make an unrelated method compile would have deleted a real
+        // protection to buy a convenience. A test going red is not always a
+        // request to change the thing it is testing.
+        //
+        // The two operations genuinely differ. save() asks "may this person
+        // exist?", where the answer can legitimately be no. update() says
+        // "this existing person changed", where a missing row is a bug.
+        //
+        // Under JPA this call does nothing but an existence check — dirty
+        // checking already scheduled the write. Under JDBC it issues a real
+        // three-column UPDATE. Correct under both, which is the property that
+        // has kept this class unchanged since Day-01.
+        return repository.update(user);
     }
 
     /**

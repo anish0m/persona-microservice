@@ -1,25 +1,23 @@
 package com.persona.user.controller;
 
 import com.persona.user.dto.CreateUserRequest;
+import com.persona.user.dto.UpdateProfileRequest;
 import com.persona.user.dto.UserResponse;
-import com.persona.user.exception.DuplicateEmailException;
-import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import com.persona.user.service.UserService;
-import org.springframework.http.HttpStatus;
+import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
 import java.util.List;
-import java.util.Map;
 
 /**
  * The web edge of the user domain.
@@ -89,20 +87,60 @@ public class UserController {
      * tutorials show. It is still wrong, because the rule then lives in the
      * controller, and next year's admin bulk-import and mobile endpoint do not go
      * through this method. The service throws; this class only decides what that
-     * means in HTTP. See {@link #handleDuplicate}.
+     * means in HTTP. See {@link com.persona.user.controller.GlobalExceptionHandler}.
      */
     @PostMapping
-    public ResponseEntity<UserResponse> create(@RequestBody CreateUserRequest request) {
-        // The service never sees a DTO. The web layer's types stop at this line;
-        // below it, the application is transport-agnostic again.
-        User saved = service.register(new User(
-                request.email(),
-                request.firstName(),
-                request.lastName(),
-                request.password()));
+    public ResponseEntity<UserResponse> create(@Valid @RequestBody CreateUserRequest request) {
+        // Day-05: this method no longer builds the User.
+        //
+        // It used to call `new User(...)` and hand the result to
+        // service.register(User). That looked like the controller doing
+        // harmless assembly, and it was the wrong place for two reasons:
+        //
+        //   1. The service could not tell a request-built User from a
+        //      database-loaded one, so it could not know whether the password
+        //      needed hashing. Taking the DTO makes that unambiguous.
+        //   2. Any future caller that is not an HTTP request — an admin
+        //      import, a scheduler — would have had to remember to hash. Now
+        //      there is nothing to remember, because register() owns it.
+        //
+        // What remains here is translation, which is all this class ever does.
+        User saved = service.register(request);
 
         URI location = URI.create("/users/" + saved.getEmail());
         return ResponseEntity.created(location).body(UserResponse.from(saved));
+    }
+
+    /**
+     * Edit a profile. {@code PUT /users/{email}}. <b>Day-05.</b>
+     *
+     * <p><b>PUT, not POST</b>, because this replaces the complete editable state
+     * of an existing resource and is idempotent: sending it twice leaves the
+     * server exactly as sending it once did. POST is for "create a thing",
+     * which is why it is neither safe nor idempotent and why the browser warns
+     * before resubmitting one.
+     *
+     * <p><b>PUT, not PATCH</b>, because {@link UpdateProfileRequest} carries all
+     * three editable fields rather than a subset. See that record for why PATCH
+     * would cost more than it is worth here — and for the consequence that
+     * omitting {@code image} from the body <em>clears</em> the image, which is
+     * what "complete new state" means and is not a bug.
+     *
+     * <p><b>200, not 201 and not 204.</b> 201 would claim something was created.
+     * 204 would be defensible, but returning the updated profile saves the
+     * client a follow-up GET and lets it see server-derived fields — most
+     * visibly {@code username}, which changes when the name does and which the
+     * client cannot compute for itself without duplicating the rule.
+     *
+     * <p>The email comes from the <b>path</b>, not the body, and the body has no
+     * email field to disagree with it. A body that could carry a second,
+     * different email would raise the question of which one wins, and every
+     * answer to that question is a vulnerability in some reading.
+     */
+    @PutMapping("/{email}")
+    public UserResponse updateProfile(@PathVariable String email,
+                                      @Valid @RequestBody UpdateProfileRequest request) {
+        return UserResponse.from(service.updateProfile(email, request));
     }
 
     /**
@@ -174,76 +212,20 @@ public class UserController {
     }
 
     // =================================================================
-    //  Exception translation.
+    //  Exception translation MOVED OUT. Day-05. See GlobalExceptionHandler.
     //
-    //  These methods are a routing table: exception type in, status code
-    //  out. Spring catches anything thrown below this class and dispatches
-    //  on the TYPE.
+    //  The Day-02 comment here said option 3 (@RestControllerAdvice) should
+    //  wait until it was "a genuine, visible improvement rather than
+    //  architecture applied in advance". Day-05 made it genuine:
+    //  MethodArgumentNotValidException is a FRAMEWORK exception with one
+    //  correct response everywhere, so handling it per-controller is
+    //  duplication at N=1.
     //
-    //  Which is only possible because Day-01 built real exception classes.
-    //  Had the service thrown `new RuntimeException("email taken")`, there
-    //  would be nothing to dispatch on but the English text — and you
-    //  cannot route on a sentence.
-    //
-    //  Three places this translation could live:
-    //    1. try/catch in every method            -> N copies of the rule
-    //    2. @ExceptionHandler here               -> one copy, this controller
-    //    3. @RestControllerAdvice, app-wide      -> Day-09
-    //
-    //  Option 2 today, because there is exactly one controller and moving to
-    //  option 3 is then a genuine, visible improvement rather than
-    //  architecture applied in advance.
+    //  In a microservice there is a second reason the monolith does not have.
+    //  These status codes are this service's PUBLIC CONTRACT — an exception
+    //  cannot cross the wire, so a caller only ever sees the status and the
+    //  body. Scattering that contract across controllers means no single file
+    //  answers "what can this service return?", which is the first question
+    //  anyone integrating with it will ask.
     // =================================================================
-
-    /**
-     * 409 Conflict. The request is well-formed and the rule is clear — the world
-     * is simply not in the state the client assumed.
-     *
-     * <p>409 and 404 are opposites: "already exists" against "does not exist".
-     *
-     * <p>409 against 400 is the subtler line, and worth memorising as a sentence:
-     * <b>400 says fix your request; 409 says your request is fine, the world
-     * isn't.</b> Resending an identical 400 is pointless. Resending an identical
-     * 409 might succeed tomorrow.
-     *
-     * <p>Without this method the exception escapes to Spring's default handler and
-     * becomes a <b>500</b> — and 500 is a lie here. The 4xx/5xx split answers
-     * "whose problem is this", and it is the line the entire alerting stack is built
-     * on. Classify ordinary duplicate signups as server errors and the 5xx graph
-     * spikes during normal use until nobody looks at it any more.
-     */
-    @ExceptionHandler(DuplicateEmailException.class)
-    public ResponseEntity<Map<String, String>> handleDuplicate(DuplicateEmailException e) {
-        return ResponseEntity.status(HttpStatus.CONFLICT)
-                .body(Map.of("error", e.getMessage()));
-    }
-
-    /** 404 Not Found — the resource named by the URL does not exist. */
-    @ExceptionHandler(UserNotFoundException.class)
-    public ResponseEntity<Map<String, String>> handleNotFound(UserNotFoundException e) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("error", e.getMessage()));
-    }
-
-    /**
-     * 400 Bad Request — the model's own validation rejected the input, so the
-     * request itself is malformed and no amount of resending will help.
-     *
-     * <p>Note the body is a small JSON object holding the message, and nothing else.
-     * Two failure modes are being avoided:
-     *
-     * <ul>
-     *   <li>Returning {@code 200 {"success": false}} — re-inventing the status code,
-     *       badly, inside the body, where no proxy, cache or monitoring tool will
-     *       ever see it.</li>
-     *   <li>Returning the stack trace. It reveals framework versions, package
-     *       structure and often SQL. That is reconnaissance, handed over on
-     *       request.</li>
-     * </ul>
-     */
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, String>> handleBadInput(IllegalArgumentException e) {
-        return ResponseEntity.badRequest()
-                .body(Map.of("error", e.getMessage()));
-    }
 }

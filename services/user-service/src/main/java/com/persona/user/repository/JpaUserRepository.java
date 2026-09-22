@@ -174,6 +174,44 @@ public class JpaUserRepository implements UserRepository {
     }
 
     /**
+     * Records changes to an existing user. <b>Day-05.</b>
+     *
+     * <p><b>This method does almost nothing, and that is the lesson.</b> The
+     * caller obtained the {@code User} from this repository inside the same
+     * transaction, so it is <em>managed</em>: Hibernate holds a snapshot of it
+     * and, at commit, compares the object to that snapshot and writes an UPDATE
+     * for whatever differs. The setters in {@code UserService.updateProfile}
+     * already scheduled the write. There is nothing left to do.
+     *
+     * <p>Compare {@code JdbcUserRepository.update}, which spells out an UPDATE
+     * statement with three columns and checks the row count. Same interface
+     * method, same guarantee, and one of the two implementations is empty. That
+     * asymmetry is the concrete value of the persistence context, and it is also
+     * the reason dirty checking is dangerous to rely on without understanding:
+     * the code that works has no visible write in it, so nothing in the source
+     * shows why it works or when it would stop.
+     *
+     * <p>The existence check is not redundant. Callers reach this through
+     * {@code getByEmail}, which already throws, but the interface's contract
+     * says a missing user is an error and an implementation may not quietly
+     * depend on every caller having checked first.
+     *
+     * <p>No {@code flush()} here, unlike {@code save}. {@code save} flushes
+     * because it needs the constraint violation to surface inside its own
+     * try/catch rather than at commit, somewhere with no context. An update
+     * touches no unique column, so there is no violation to catch and no reason
+     * to force the write early.
+     */
+    @Override
+    @Transactional
+    public User update(User user) {
+        if (!users.existsByEmail(user.getEmail())) {
+            throw new UserNotFoundException(user.getEmail());
+        }
+        return user;
+    }
+
+    /**
      * Identifies the specific constraint from the exception, without touching
      * the database.
      *

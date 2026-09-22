@@ -236,4 +236,70 @@ class JpaUserRepositoryIT {
 
         assertEquals("Turhan", stored, "no save() was called, and the row changed");
     }
+
+    /**
+     * update() under JPA, where the write has already happened.
+     *
+     * <p>This is the counterpart to
+     * {@code JdbcUserRepositoryIT.updateWritesTheChangeToTheRow}, and the
+     * comparison is the lesson. That test needs a real UPDATE statement to
+     * pass. This one would pass even if {@code update} were deleted entirely,
+     * because dirty checking wrote the row at flush.
+     *
+     * <p>Which is worth sitting with: the same interface method is load-bearing
+     * in one implementation and ceremonial in the other, and nothing in the
+     * calling code shows the difference. Convenient, and exactly why dirty
+     * checking is dangerous to rely on without understanding — code that works
+     * with no visible write gives no hint about when it would stop.
+     */
+    @Test
+    void updateWritesTheChangeToTheRow() {
+        repository.save(anishom());
+
+        User managed = repository.getByEmail("khi0ne@example.com");
+        managed.setFirstName("Turhan");
+        managed.setLastName("Winter");
+        repository.update(managed);
+        springData.flush();
+
+        String firstName = jdbc.sql("SELECT first_name FROM users WHERE email = ?")
+                .param("khi0ne@example.com")
+                .query(String.class)
+                .single();
+
+        assertEquals("Turhan", firstName);
+    }
+
+    @Test
+    void updatingAMissingUserThrows() {
+        User ghost = new User("nobody@example.com", "No", "Body", "hash");
+
+        assertThrows(UserNotFoundException.class, () -> repository.update(ghost));
+    }
+
+    /**
+     * ddl-auto: validate accepted the password_hash mapping.
+     *
+     * <p>Not a direct assertion — it cannot be, because validate runs at
+     * startup and a mismatch means the context never comes up. If
+     * {@code @Column(name = "password_hash", length = 60)} disagreed with the
+     * column V2 created, every test in this class would error during context
+     * initialisation rather than failing here.
+     *
+     * <p>So this test asserts the thing validate proves indirectly: the
+     * application's idea of the column and the database's agree.
+     */
+    @Test
+    void theStoredHashColumnMatchesTheMapping() {
+        repository.save(anishom());
+
+        Integer length = jdbc.sql("""
+                        SELECT character_maximum_length FROM information_schema.columns
+                         WHERE table_name = 'users' AND column_name = 'password_hash'
+                        """)
+                .query(Integer.class)
+                .single();
+
+        assertEquals(60, length, "V2's column width must match the entity mapping");
+    }
 }

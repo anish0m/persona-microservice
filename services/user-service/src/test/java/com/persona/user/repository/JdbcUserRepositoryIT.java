@@ -142,7 +142,9 @@ class JdbcUserRepositoryIT {
 
         assertEquals("Anishom", found.getFirstName());
         assertEquals("Frost", found.getLastName());
-        assertEquals("Pass1234#", found.getPassword());
+        // The repository stores whatever hash it is handed and does not hash
+        // anything itself — hashing is the service's job (Day-05).
+        assertEquals("Pass1234#", found.getPasswordHash());
         assertEquals("@anishom-frost", found.getUsername());
         assertTrue(found.getImage().isEmpty(), "image was never set, so the column is NULL");
     }
@@ -213,5 +215,96 @@ class JdbcUserRepositoryIT {
 
         assertEquals(1, applied);
         assertFalse(applied > 1, "a migration must never be applied twice");
+    }
+
+    // =================================================================
+    //  Day-05 — update(), which in THIS implementation is a real UPDATE.
+    // =================================================================
+
+    /**
+     * The edit reaches the database.
+     *
+     * <p>Trivial-looking, and it is the test that distinguishes the two
+     * implementations. Under JPA, {@code update} does nothing at all and the
+     * write happens through dirty checking. Here there is no persistence
+     * context, so without the UPDATE statement this assertion fails — the Java
+     * object would change and the row would not.
+     *
+     * <p>The row is read back with raw SQL rather than through the repository,
+     * for the Day-04 reason: asking the component under test whether it worked
+     * lets a cache answer on the database's behalf.
+     */
+    @Test
+    void updateWritesTheChangeToTheRow() {
+        repository.save(anishom());
+
+        User stored = repository.getByEmail("khi0ne@example.com");
+        stored.setFirstName("Turhan");
+        stored.setLastName("Winter");
+        repository.update(stored);
+
+        String firstName = jdbc.sql("SELECT first_name FROM users WHERE email = ?")
+                .param("khi0ne@example.com")
+                .query(String.class)
+                .single();
+
+        assertEquals("Turhan", firstName);
+    }
+
+    /**
+     * update() must not touch the password column.
+     *
+     * <p>The UPDATE statement names three columns and password_hash is not one
+     * of them. Asserted rather than trusted, because the failure — a profile
+     * edit quietly resetting a password — produces no error and would be found
+     * by a locked-out user rather than by a test.
+     */
+    @Test
+    void updateDoesNotTouchThePasswordHash() {
+        repository.save(anishom());
+        String before = jdbc.sql("SELECT password_hash FROM users WHERE email = ?")
+                .param("khi0ne@example.com").query(String.class).single();
+
+        User stored = repository.getByEmail("khi0ne@example.com");
+        stored.setFirstName("Turhan");
+        repository.update(stored);
+
+        String after = jdbc.sql("SELECT password_hash FROM users WHERE email = ?")
+                .param("khi0ne@example.com").query(String.class).single();
+
+        assertEquals(before, after);
+    }
+
+    /**
+     * Updating a row that is not there throws rather than succeeding quietly.
+     *
+     * <p>An UPDATE matching zero rows is a perfectly successful statement in
+     * SQL. Without the row-count check in the implementation, this method would
+     * return normally and the caller would believe the edit landed.
+     */
+    @Test
+    void updatingAMissingUserThrows() {
+        User ghost = new User("nobody@example.com", "No", "Body", "hash");
+
+        assertThrows(UserNotFoundException.class, () -> repository.update(ghost));
+    }
+
+    /**
+     * Both migrations ran, in order.
+     *
+     * <p>Widened from the original Day-03 assertion, which only checked V1.
+     * V2 renamed the password column, and a test that counts only the first
+     * migration would still pass against a database that never received the
+     * rename — the query below would then be selecting a column that does not
+     * exist, which is precisely the failure worth catching.
+     */
+    @Test
+    void bothMigrationsAreRecorded() {
+        Integer applied = jdbc.sql(
+                        "SELECT COUNT(*) FROM flyway_schema_history WHERE success = true")
+                .query(Integer.class)
+                .single();
+
+        assertEquals(2, applied, "V1 and V2 must both be applied exactly once");
     }
 }

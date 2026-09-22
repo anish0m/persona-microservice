@@ -1,0 +1,108 @@
+-- ===========================================================================
+--  V2 — password becomes password_hash.
+--
+--  V1 said, in a comment: "255 because Day-05 stores a BCrypt hash (60 chars),
+--  not a password. Today it is still plaintext, which is a known, dated debt."
+--  This is that date. The debt is being paid in the place it was recorded.
+--
+--  WHY A MIGRATION AND NOT AN EDIT TO V1.
+--
+--  V1 has run. Its checksum is in flyway_schema_history. Editing it now makes
+--  Flyway refuse to start — correctly, because the alternative is a schema that
+--  silently differs between a laptop and production. The schema's history is
+--  append-only for the same reason a ledger is.
+--
+--  WHY RENAME AT ALL, WHEN `password` WOULD STILL HOLD THE HASH FINE.
+--
+--  Because a column named `password` containing a hash is a lie, and the cost
+--  of a lie in a schema is paid by whoever reads it next without the context.
+--  A name is the cheapest documentation there is, and the only kind that
+--  cannot drift out of date silently.
+--
+--  There is a second, harder benefit. Any code still assuming plaintext refers
+--  to a column that no longer exists, so it FAILS rather than quietly doing the
+--  wrong thing. Compare the two worlds:
+--
+--     keep the name   ->  old code compiles, runs, stores plaintext. Silent.
+--     rename it       ->  old code fails to map. Loud, at startup.
+--
+--  This is the same instinct as @Column(insertable = false) on created_at and
+--  as GENERATED ALWAYS on the id: make the wrong thing impossible to express
+--  rather than merely discouraged.
+-- ===========================================================================
+
+ALTER TABLE users RENAME COLUMN password TO password_hash;
+
+-- Narrow the column to what BCrypt actually produces.
+--
+-- A BCrypt hash is ALWAYS exactly 60 characters:
+--
+--     $2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy
+--     |   |  |                      |
+--     |   |  +- salt, 22 chars      +- hash, 31 chars
+--     |   +---- cost factor
+--     +-------- algorithm version
+--
+-- 60 is not a guess and not a convention — it is fixed by the format.
+--
+-- WHY NARROW IT, rather than leaving the harmless VARCHAR(255)?
+--
+-- Because a 255-wide column is wide enough to hold a plaintext password, and a
+-- column that CAN hold the wrong thing eventually will. At 60, the day some
+-- future code forgets to hash, the INSERT fails loudly at the boundary instead
+-- of storing a readable password that nobody notices for a year.
+--
+-- Not 60 exactly but 72 would be the cautious choice if the algorithm were ever
+-- to change (argon2 hashes are longer). Deliberately choosing the tight bound:
+-- an algorithm change is a migration anyway, and V3 can widen it in one line.
+-- Design for what is true now, and let the schema's history record the change.
+ALTER TABLE users ALTER COLUMN password_hash TYPE VARCHAR(60);
+
+COMMENT ON COLUMN users.password_hash IS
+    'BCrypt hash, 60 chars, salt and cost factor included in the string. Never a plaintext password.';
+
+-- ===========================================================================
+--  WHAT THIS MIGRATION DELIBERATELY DOES NOT DO.
+--
+--  It does not convert the existing rows. Any plaintext password already in
+--  this table stays as it is, and will now fail to match on login because a
+--  plaintext string is not a valid BCrypt hash.
+--
+--  That is the CORRECT outcome, and the reasoning is worth keeping:
+--
+--    - A plaintext password cannot be "upgraded" in place by hashing it,
+--      because doing so would require reading it — and reading it is the exact
+--      thing that must stop being possible. Hashing existing plaintext would
+--      work mechanically and would mean the migration itself handled every
+--      user's password in the clear, in a file committed to git.
+--
+--    - The honest treatment of a leaked-by-design password column is that
+--      every password in it is compromised. Real systems force a reset.
+--
+--  persona has no production data and no users, so the practical answer is
+--  that the table is empty. The reasoning is recorded because on a real system
+--  this migration is the easy half, and "force every user to reset" is the
+--  half that needs a plan.
+--
+--  ALTER COLUMN TYPE would in fact FAIL on a non-empty table here, since
+--  existing plaintext may exceed 60 chars. Postgres refusing is, once again,
+--  the database being more careful than the application.
+-- ===========================================================================
+
+-- ===========================================================================
+--  MICROSERVICE NOTE — why this migration is safe to apply alone.
+--
+--  This file is byte-identical to the monolith's V2, and the reason that is
+--  fine here is database-per-service: user-service owns `users` outright, so
+--  renaming a column requires no coordination with anyone.
+--
+--  In a shared database it would be a different operation entirely. Any other
+--  service reading users.password would break at the instant this ran, and the
+--  deploy would have to be staged: add the new column, write to both, migrate
+--  readers one service at a time, then drop the old one. Four deploys instead
+--  of one, spread across teams.
+--
+--  Which is the trade stated concretely. Database-per-service costs a JOIN you
+--  can no longer write; it buys a schema you can change on a Tuesday without
+--  asking anybody. Day-17 is where PayNest pays this same price.
+-- ===========================================================================

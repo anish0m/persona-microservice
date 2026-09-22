@@ -85,6 +85,32 @@ public class InMemoryUserRepository implements UserRepository {
     }
 
     /**
+     * Records changes to an existing user. <b>Day-05.</b>
+     *
+     * <p>Note this does almost nothing: the map already holds a reference to this
+     * exact object, so mutating it through the setters has already changed what
+     * is "stored". The {@code put} is therefore redundant in this implementation
+     * and is written anyway, because relying on the store and the caller sharing
+     * one object is an accident of holding things in memory. The JDBC
+     * implementation shares nothing, and a method whose correctness depends on
+     * which implementation is active is not an abstraction.
+     *
+     * <p>The existence check is the point of the method. It is what makes
+     * "update something that is not there" a loud failure rather than a silent
+     * insert.
+     */
+    @Override
+    public User update(User user) {
+        if (!usersByEmail.containsKey(user.getEmail())) {
+            throw new UserNotFoundException(user.getEmail());
+        }
+        usersByEmail.put(user.getEmail(), user);
+        return user;
+    }
+
+
+
+    /**
      * Finds a user, or returns empty.
      *
      * <p>{@code Optional} here, an exception in {@link #getByEmail}, and the

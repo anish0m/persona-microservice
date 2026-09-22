@@ -230,21 +230,43 @@ public class User {
     private String lastName;
 
     /**
-     * Stored as given for now. This is a known, temporary lie: Day-06 replaces it
-     * with a BCrypt hash and this field becomes {@code passwordHash}. It is named
-     * plainly today so that the change on Day-06 is visible and deliberate rather
-     * than silent.
+     * A <b>BCrypt hash</b>, never a password. Day-05 paid the debt this field's
+     * previous comment recorded: it used to be called {@code password} and used to
+     * hold plaintext.
+     *
+     * <p><b>The rename is the point, not a tidy-up.</b> Renaming made every line
+     * that assumed plaintext fail to compile, so the change could not be
+     * half-applied — the compiler enumerated the work instead of a human trying
+     * to remember it. A name that cannot drift out of date silently is the
+     * cheapest documentation available.
+     *
+     * <p><b>This class does not hash, and must not.</b> Hashing needs a
+     * {@link org.springframework.security.crypto.password.PasswordEncoder}, and a
+     * model holding a Spring bean has stopped being a model. The encoder lives in
+     * {@code UserService}.
+     *
+     * <p><b>A microservice-specific warning about this field.</b> The obvious
+     * next feature is "let other services verify a password", and the obvious
+     * implementation is to expose this value on an internal endpoint. Do not.
+     * A hash on the wire is a hash in someone's log aggregator, someone's trace
+     * span and someone's cached response, and it is now in as many places as
+     * there are services that called you. <b>This service verifies credentials
+     * and returns a yes or no; it does not distribute the material.</b> The
+     * whole reason authentication is one service's job is that the secret then
+     * has one home.
      *
      * <p><b>Day-04 note on mapping being opt-OUT.</b> Nothing here says "persist
      * this" — every non-static, non-transient field is mapped by default. So this
      * field is stored because it was not excluded, not because it was chosen. A
      * field that must never reach the database takes {@code @Transient} (the JPA
      * annotation, meaning "not for the database" — not the Java {@code transient}
-     * keyword, which means "not for serialization"). Worth knowing precisely here,
-     * because this is the field most likely to be reached for on Day-06.
+     * keyword, which means "not for serialization").
+     *
+     * <p>{@code length = 60} matches V2 exactly, so {@code ddl-auto: validate}
+     * audits the claim at startup and refuses to boot on a mismatch.
      */
-    @Column(name = "password", nullable = false, length = 255)
-    private String password;
+    @Column(name = "password_hash", nullable = false, length = 60)
+    private String passwordHash;
 
     /**
      * A profile picture URL, or {@code null} when the person has not set one.
@@ -299,16 +321,24 @@ public class User {
      *
      * <p>Note it delegates to the setters rather than assigning directly. Both
      * routes into a field — construction and later mutation — then run the same
-     * validation, written once. Duplicate the rule instead and Day-06's switch to
+     * validation, written once. Duplicate the rule instead and Day-05's switch to
      * BCrypt gets applied to one path and forgotten in the other, which lets an
      * unhashed password in through the constructor.
+     *
+     * <p><b>Day-05 update, and the comment above turned out to be load-bearing.</b>
+     * The fourth parameter is now {@code passwordHash}. This constructor cannot
+     * verify that claim — it takes a String, and a plaintext password is also a
+     * String. That is not a gap to patch with a regex: it is the reason the
+     * service takes a {@code CreateUserRequest} rather than a {@code User}. A
+     * type only ever built from a request body can only ever carry plaintext, so
+     * the question stops being askable rather than being answered carefully.
      */
-    public User(String email, String firstName, String lastName, String password) {
+    public User(String email, String firstName, String lastName, String passwordHash) {
         requireText(email, "Email");
         this.email = email;
         setFirstName(firstName);
         setLastName(lastName);
-        setPassword(password);
+        setPasswordHash(passwordHash);
     }
 
     /**
@@ -340,8 +370,8 @@ public class User {
      * and worth noticing as the exception.
      */
     public User(Long id, String email, String firstName, String lastName,
-                String password, String image, java.time.Instant createdAt) {
-        this(email, firstName, lastName, password);
+                String passwordHash, String image, java.time.Instant createdAt) {
+        this(email, firstName, lastName, passwordHash);
         this.id = id;
         this.image = image;
         this.createdAt = createdAt;
@@ -405,13 +435,34 @@ public class User {
         this.lastName = lastName;
     }
 
-    public String getPassword() {
-        return password;
+    /**
+     * The stored BCrypt hash.
+     *
+     * <p>Public, and acceptable now in a way a plaintext {@code getPassword()}
+     * never was: a hash is not a credential, because logging in supplies a
+     * password and the server hashes it. The damage a leaked hash does is
+     * bounded by how long the password takes to guess — which is the entire
+     * reason BCrypt is slow.
+     *
+     * <p>It still must not leave this service. See the field's javadoc: the one
+     * legitimate caller is Day-06's login check, inside this process.
+     */
+    public String getPasswordHash() {
+        return passwordHash;
     }
 
-    public void setPassword(String password) {
-        requireText(password, "Password");
-        this.password = password;
+    /**
+     * Replaces the stored hash.
+     *
+     * <p>{@code requireText} is honest about its limits: it proves the value is
+     * present and non-blank, not that it is a hash. A {@code startsWith("$2")}
+     * check was rejected — it would hard-code one algorithm into the model, so
+     * moving to argon2 would break the domain class rather than the one service
+     * method that chose the algorithm.
+     */
+    public void setPasswordHash(String passwordHash) {
+        requireText(passwordHash, "Password hash");
+        this.passwordHash = passwordHash;
     }
 
     /**

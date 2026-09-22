@@ -48,6 +48,35 @@ public interface UserRepository {
     User save(User user);
 
     /**
+     * Persists changes to a user that already exists. <b>Day-05.</b>
+     *
+     * <p><b>Why this is not {@link #save}.</b> The obvious move when
+     * {@code updateProfile} was written was to call {@code save} again, and it
+     * failed immediately and correctly: {@code save} means <em>insert</em>, and
+     * every implementation of it rejects an email that is already taken. That is
+     * not a limitation to work around — it is the duplicate-signup guarantee,
+     * and making {@code save} quietly become an upsert would have deleted it.
+     *
+     * <p>The two operations answer different questions. {@code save} asks "may
+     * this person exist?" and the answer can be no. {@code update} asks "record
+     * that this existing person changed", where a missing row is a programming
+     * error rather than a business outcome — so it throws
+     * {@link com.persona.user.exception.UserNotFoundException} rather than returning
+     * an {@code Optional}.
+     *
+     * <p><b>Under JPA this method has almost nothing to do.</b> Inside a
+     * transaction the entity is managed, so the setters have already scheduled
+     * the UPDATE through dirty checking and the implementation only needs to
+     * return the object. It exists for the JDBC implementation, which has no
+     * persistence context and would otherwise silently lose the edit. Keeping
+     * both implementations behind one interface costs exactly this: a method
+     * that is real work on one side and a formality on the other.
+     */
+    User update(User user);
+
+
+
+    /**
      * Finds a user, or empty if there is none.
      *
      * <p>{@code Optional} here and an exception in {@link #getByEmail} — the whole

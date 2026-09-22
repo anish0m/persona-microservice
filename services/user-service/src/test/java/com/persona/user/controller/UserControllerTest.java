@@ -1,10 +1,13 @@
 package com.persona.user.controller;
 
+import com.persona.user.dto.CreateUserRequest;
+import com.persona.user.dto.UpdateProfileRequest;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import com.persona.user.service.UserService;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.MediaType;
@@ -18,10 +21,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -40,6 +48,21 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * exception handlers — and deliberately not the service, the repository or a
  * database. It is a slice test, and it costs a fraction of a full
  * {@code @SpringBootTest}.
+ *
+ * <h2>What this class is really testing, in a microservice</h2>
+ *
+ * <p>In the monolith these tests check a translation layer. Here they check
+ * <b>the service's public contract</b>: an exception cannot cross the wire, so
+ * every caller of user-service sees only the status code and the body shape
+ * asserted below. A 409 quietly becoming a 422, or {@code errors} becoming
+ * {@code fieldErrors}, breaks every consumer — and breaks them silently,
+ * because nothing anywhere fails to compile.
+ *
+ * <p>Which makes the assertions in this file closer to a published schema than
+ * to ordinary unit tests. That is also why {@code thereIsNoCountEndpoint}
+ * matters more here than it did in the monolith: in a microservice, a public
+ * method that accidentally becomes a public endpoint is a public method another
+ * team will start depending on.
  *
  * <p>{@code @MockitoBean} then supplies a fake {@code UserService}. That is what
  * makes a case like "409 when the email is taken" cheap to write: the test states
@@ -79,7 +102,7 @@ class UserControllerTest {
      */
     @Test
     void signupReturns201WithLocation() throws Exception {
-        when(service.register(any(User.class))).thenReturn(anishom());
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
 
         mockMvc.perform(post("/users")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -103,7 +126,7 @@ class UserControllerTest {
      */
     @Test
     void responseNeverContainsThePassword() throws Exception {
-        when(service.register(any(User.class))).thenReturn(anishom());
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
 
         mockMvc.perform(post("/users")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -124,24 +147,30 @@ class UserControllerTest {
      */
     @Test
     void duplicateEmailReturns409() throws Exception {
-        when(service.register(any(User.class)))
+        when(service.register(any(CreateUserRequest.class)))
                 .thenThrow(new DuplicateEmailException("khi0ne@example.com"));
 
         mockMvc.perform(post("/users")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(VALID_JSON))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error").exists());
+                .andExpect(jsonPath("$.detail").exists());
     }
 
     /**
-     * Invalid input is 400 — the model's own {@code IllegalArgumentException},
-     * translated.
+     * Invalid input is 400 — and as of Day-05 it is rejected one layer earlier
+     * than it used to be.
      *
-     * <p>The service is never reached here: the controller builds the {@code User}
-     * first, and the constructor rejects the blank email before
-     * {@code register} is called. Validation at the edge, by the model, without the
-     * controller knowing the rule.
+     * <p>This test passed before today too, but for a different reason, and the
+     * difference is the whole point of adding {@code @Valid}. Previously the
+     * controller built a {@code User}, whose constructor threw
+     * {@code IllegalArgumentException}. Now {@code @NotBlank} rejects the body
+     * before any application code runs at all — the service is never called, and
+     * neither is the model.
+     *
+     * <p>Both layers still exist and both still matter; see
+     * {@link CreateUserRequest} for why deleting either one causes a real
+     * defect.
      */
     @Test
     void blankEmailReturns400() throws Exception {
@@ -152,7 +181,7 @@ class UserControllerTest {
                                  "lastName": "Frost", "password": "Pass1234#"}
                                 """))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").exists());
+                .andExpect(jsonPath("$.detail").exists());
     }
 
     /** An empty collection is a successful answer: {@code 200 []}, never 404. */
@@ -194,7 +223,7 @@ class UserControllerTest {
 
         mockMvc.perform(get("/users/nobody@example.com"))
                 .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.error").exists());
+                .andExpect(jsonPath("$.detail").exists());
     }
 
     /**
@@ -247,5 +276,192 @@ class UserControllerTest {
 
         mockMvc.perform(get("/users/count"))
                 .andExpect(status().isNotFound());
+    }
+
+    // =================================================================
+    //  Day-05 — validation at the edge, and the shape of an error.
+    // =================================================================
+
+    /**
+     * Several invalid fields produce ONE response naming ALL of them.
+     *
+     * <p>This is what {@code @Valid} buys that a hand-written guard cannot. A
+     * guard is a {@code throw}, and a throw ends the method, so it reports the
+     * first failure only: the caller fixes one field, resubmits, and discovers
+     * the next. Bean validation collects every violation before failing.
+     *
+     * <p>Note the test asserts on the STRUCTURE, not on the message text. The
+     * response carries a field-to-message map, so a client can highlight three
+     * inputs without parsing English out of a sentence. An error is data.
+     */
+    @Test
+    void everyInvalidFieldIsReportedAtOnce() throws Exception {
+        mockMvc.perform(post("/users")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "not-an-email", "firstName": "",
+                                 "lastName": "", "password": "short"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.email").exists())
+                .andExpect(jsonPath("$.errors.firstName").exists())
+                .andExpect(jsonPath("$.errors.lastName").exists())
+                .andExpect(jsonPath("$.errors.password").exists());
+
+        // And the service was never reached. Validation at the edge means the
+        // application layer is not asked to defend itself against nonsense it
+        // could not have produced.
+        verifyNoInteractions(service);
+    }
+
+    /**
+     * A password shorter than the minimum is rejected, with the field named.
+     *
+     * <p>Worth its own test rather than folding into the one above, because this
+     * is the constraint most likely to be loosened by someone in a hurry, and a
+     * named test is harder to delete silently than one assertion inside five.
+     */
+    @Test
+    void aShortPasswordIsRejected() throws Exception {
+        mockMvc.perform(post("/users")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "khi0ne@example.com", "firstName": "Anishom",
+                                 "lastName": "Frost", "password": "short"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.password").exists());
+    }
+
+    /**
+     * Malformed JSON is 400, not 500.
+     *
+     * <p>Without a handler for {@code HttpMessageNotReadableException}, a
+     * trailing comma in a request body is reported as a server error — the
+     * server confessing to the caller's typo. 4xx and 5xx answer "whose problem
+     * is this", and that answer is what the whole alerting stack is built on.
+     */
+    @Test
+    void malformedJsonReturns400() throws Exception {
+        mockMvc.perform(post("/users")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{ this is not json "))
+                .andExpect(status().isBadRequest());
+    }
+
+    /**
+     * An error body never leaks the internals that produced it.
+     *
+     * <p>Asserting on absence again. The failure this prevents — a constraint
+     * name, a table name or a stack trace reaching the client — is invisible in
+     * every manual test, because the response still looks like a sensible error.
+     */
+    @Test
+    void anErrorBodyNeverLeaksInternals() throws Exception {
+        when(service.register(any(CreateUserRequest.class)))
+                .thenThrow(new DuplicateEmailException("khi0ne@example.com"));
+
+        String body = mockMvc.perform(post("/users")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "khi0ne@example.com", "firstName": "Anishom",
+                                 "lastName": "Frost", "password": "Pass1234#"}
+                                """))
+                .andExpect(status().isConflict())
+                .andReturn().getResponse().getContentAsString();
+
+        assertFalse(body.contains("users_email_key"), "constraint names must not leak");
+        assertFalse(body.contains("org.springframework"), "stack traces must not leak");
+        assertFalse(body.contains("Pass1234#"), "the password must not appear in an error");
+    }
+
+    @Test
+    void updatingAProfileReturns200AndTheUpdatedUser() throws Exception {
+        User updated = new User("khi0ne@example.com", "Turhan", "Winter", "$2a$10$hash");
+        when(service.updateProfile(anyString(), any(UpdateProfileRequest.class)))
+                .thenReturn(updated);
+
+        mockMvc.perform(put("/users/khi0ne@example.com")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "Turhan", "lastName": "Winter", "image": null}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.firstName").value("Turhan"))
+                .andExpect(jsonPath("$.username").value("@turhan-winter"));
+    }
+
+    /**
+     * A profile update cannot change the password, no matter what is sent.
+     *
+     * <p>The request body below contains {@code passwordHash} and {@code email}
+     * fields. {@link UpdateProfileRequest} has neither, so Jackson discards them
+     * and there is nothing for the server to defend against — the defence is
+     * that the fields do not exist, not that they are checked for.
+     *
+     * <p>This is the test that fails the day somebody "simplifies" the endpoint
+     * to take a {@code User}, which is exactly the mass-assignment hole this
+     * record was written to close.
+     */
+    @Test
+    void aProfileUpdateCannotChangeThePasswordOrEmail() throws Exception {
+        User updated = new User("khi0ne@example.com", "Turhan", "Winter", "$2a$10$hash");
+        when(service.updateProfile(anyString(), any(UpdateProfileRequest.class)))
+                .thenReturn(updated);
+
+        mockMvc.perform(put("/users/khi0ne@example.com")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "Turhan", "lastName": "Winter",
+                                 "passwordHash": "attacker-chosen",
+                                 "email": "attacker@evil.com",
+                                 "id": 1}
+                                """))
+                .andExpect(status().isOk());
+
+        // The service received a DTO that has no field capable of carrying
+        // either value. Captured rather than assumed.
+        ArgumentCaptor<UpdateProfileRequest> captor =
+                ArgumentCaptor.forClass(UpdateProfileRequest.class);
+        verify(service).updateProfile(anyString(), captor.capture());
+
+        assertEquals("Turhan", captor.getValue().firstName());
+        // There is no getter to assert on for password or email, which IS the
+        // assertion: the type cannot express them.
+    }
+
+    @Test
+    void updatingAMissingUserReturns404() throws Exception {
+        when(service.updateProfile(anyString(), any(UpdateProfileRequest.class)))
+                .thenThrow(new UserNotFoundException("nobody@example.com"));
+
+        mockMvc.perform(put("/users/nobody@example.com")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "Turhan", "lastName": "Winter", "image": null}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").exists());
+    }
+
+    /**
+     * A blank name in an update is rejected by the DTO, not by the model.
+     *
+     * <p>Same two-layer story as signup: {@code @NotBlank} answers "did the
+     * caller send something usable" at the edge, while {@code requireText}
+     * inside {@code User} still guarantees the object cannot hold a blank name
+     * regardless of who is calling.
+     */
+    @Test
+    void aBlankNameInAnUpdateIsRejected() throws Exception {
+        mockMvc.perform(put("/users/khi0ne@example.com")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "", "lastName": "Winter", "image": null}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.firstName").exists());
+
+        verifyNoInteractions(service);
     }
 }

@@ -33,6 +33,42 @@
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!--
+          Day-05. Bean validation (Hibernate Validator) for @NotBlank / @Email /
+          @Size on the request DTOs.
+
+          The annotations compile without this jar and are then read by nobody:
+          no error, no log line, a green build, zero validation. Present but not
+          participating, for the fourth time in this project.
+
+          WORTH MORE HERE THAN IN THE MONOLITH. In the monolith, an unvalidated
+          field eventually hits the model's requireText or a NOT NULL column and
+          fails somewhere in the same process. In a microservice the natural
+          next step is that this service passes the value to ANOTHER service,
+          and the failure surfaces over there — in a log nobody watching this
+          deployment is reading, attributed to the wrong team.
+
+          Validate at YOUR OWN boundary. A service does not get to assume its
+          caller validated, even when its caller is also you.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+          Day-05. BCrypt only — deliberately NOT spring-boot-starter-security.
+
+          spring-security-crypto is a plain library: PasswordEncoder,
+          BCryptPasswordEncoder, nothing auto-configured and no filter chain.
+          The starter would lock every endpoint behind a login form that does
+          not exist yet and turn the existing tests red. Login is Day-06.
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
         <!--
           Day-03. JDBC, a connection pool (HikariCP), JdbcClient, and Spring's
           DataSource auto-configuration. NOT spring-boot-starter-data-jpa — there

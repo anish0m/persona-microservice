@@ -63,7 +63,7 @@ public class JdbcUserRepository implements UserRepository {
      * depends on.
      */
     private static final String COLUMNS =
-            "id, email, first_name, last_name, password, image, created_at";
+            "id, email, first_name, last_name, password_hash, image, created_at";
 
     private final JdbcClient jdbc;
 
@@ -98,18 +98,59 @@ public class JdbcUserRepository implements UserRepository {
     public User save(User user) {
         try {
             return jdbc.sql("""
-                        INSERT INTO users (email, first_name, last_name, password, image)
+                        INSERT INTO users (email, first_name, last_name, password_hash, image)
                         VALUES (?, ?, ?, ?, ?)
                         RETURNING
                         """ + COLUMNS)
                     .params(user.getEmail(), user.getFirstName(), user.getLastName(),
-                            user.getPassword(), user.getImage().orElse(null))
+                            user.getPasswordHash(), user.getImage().orElse(null))
                     .query(JdbcUserRepository::mapRow)
                     .single();
         } catch (DuplicateKeyException e) {
             throw new DuplicateEmailException(user.getEmail());
         }
     }
+
+    /**
+     * Writes changes to an existing row. <b>Day-05.</b>
+     *
+     * <p>This is the implementation the {@code update} method exists for. There
+     * is no persistence context here and no dirty checking — mutating the Java
+     * object changes nothing whatsoever in the database, silently, and the JPA
+     * implementation's ability to get away with doing nothing is a property of
+     * Hibernate rather than of the design.
+     *
+     * <p><b>Only three columns appear in the SET clause.</b> Not {@code email},
+     * which is identity and is the WHERE clause instead; not
+     * {@code password_hash}, which a profile edit must never touch; not
+     * {@code id} or {@code created_at}, which belong to the database. The
+     * statement cannot express the changes {@link com.persona.user.dto.UpdateProfileRequest}
+     * refuses to carry — the same restriction stated a second time, in SQL, at
+     * the far end of the call chain.
+     *
+     * <p>The row count is checked rather than assumed. An UPDATE that matches
+     * nothing is a perfectly successful statement in SQL: zero rows changed is
+     * not an error to the database, and without this check "update a user who
+     * does not exist" would return quietly and look like it worked.
+     */
+    @Override
+    public User update(User user) {
+        int rows = jdbc.sql("""
+                    UPDATE users
+                       SET first_name = ?, last_name = ?, image = ?
+                     WHERE email = ?
+                    """)
+                .params(user.getFirstName(), user.getLastName(),
+                        user.getImage().orElse(null), user.getEmail())
+                .update();
+
+        if (rows == 0) {
+            throw new UserNotFoundException(user.getEmail());
+        }
+        return getByEmail(user.getEmail());
+    }
+
+
 
     /**
      * <p>The {@code ?} is not string formatting. Written as
@@ -226,7 +267,7 @@ public class JdbcUserRepository implements UserRepository {
                 rs.getString("email"),
                 rs.getString("first_name"),
                 rs.getString("last_name"),
-                rs.getString("password"),
+                rs.getString("password_hash"),
                 rs.getString("image"),
                 rs.getObject("created_at", java.time.OffsetDateTime.class).toInstant());
     }
