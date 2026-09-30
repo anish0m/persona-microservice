@@ -1,6 +1,7 @@
 package com.persona.user.controller;
 
 import com.persona.user.exception.DuplicateEmailException;
+import com.persona.user.exception.InvalidCredentialsException;
 import com.persona.user.exception.UserNotFoundException;
 import jakarta.validation.ConstraintViolationException;
 import org.springframework.http.HttpStatus;
@@ -229,6 +230,30 @@ public class GlobalExceptionHandler {
                 HttpStatus.CONFLICT, e.getMessage());
         problem.setTitle("Conflict");
         problem.setProperty("email", e.getEmail());
+        return problem;
+    }
+
+    /**
+     * 401 Unauthorized — login failed. <b>Day-06.</b>
+     *
+     * <p><b>401, not 403, and the names actively mislead.</b> Despite being
+     * called "Unauthorized", 401 means <em>unauthenticated</em>: the server
+     * does not know who you are, and offering credentials might help. 403
+     * Forbidden means the opposite — it knows exactly who you are and the
+     * answer is still no. Login failure is unambiguously the first.
+     *
+     * <p><b>Note what this handler does not add.</b> Every other 4xx handler
+     * here attaches the offending value as a structured property so the client
+     * can act on it. This one attaches nothing and returns a fixed message:
+     * distinguishing "no such account" from "wrong password" would let anyone
+     * enumerate registered emails one request at a time. The blandness is the
+     * feature.
+     */
+    @ExceptionHandler(InvalidCredentialsException.class)
+    public ProblemDetail handleInvalidCredentials(InvalidCredentialsException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.UNAUTHORIZED, e.getMessage());
+        problem.setTitle("Unauthorized");
         return problem;
     }
 

@@ -1,8 +1,10 @@
 package com.persona.user.service;
 
 import com.persona.user.dto.CreateUserRequest;
+import com.persona.user.dto.LoginRequest;
 import com.persona.user.dto.UpdateProfileRequest;
 import com.persona.user.exception.DuplicateEmailException;
+import com.persona.user.exception.InvalidCredentialsException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import com.persona.user.repository.UserRepository;
@@ -239,6 +241,54 @@ public class UserService {
         // has kept this class unchanged since Day-01.
         return repository.update(user);
     }
+
+    /**
+     * Verifies credentials for login. <b>Day-06.</b> Returns the authenticated
+     * {@link User} on success; throws {@link InvalidCredentialsException}
+     * otherwise.
+     *
+     * <p><b>The two failure modes are collapsed into one deliberately.</b> "No
+     * user with that email" and "wrong password for that email" are different
+     * facts internally — but returning a different response for each turns
+     * this endpoint into an account-enumeration oracle: an attacker wanting to
+     * know which emails are registered simply tries logging in with each and
+     * reads which error comes back. One outcome, one message, regardless of
+     * which half failed.
+     *
+     * <p>{@code passwordEncoder.matches(raw, stored)} — never {@code equals} —
+     * because {@code encode(x)} draws a new random salt every call, so no two
+     * hashes of the same password are ever equal. {@code matches} reads the
+     * salt and cost back out of the stored hash and re-derives before
+     * comparing.
+     */
+    public User login(LoginRequest request) {
+        Optional<User> maybeUser = repository.findByEmail(request.email());
+
+        if (maybeUser.isEmpty()) {
+            // Without this, an unregistered email answers FASTER than a
+            // registered one with a wrong password, because the real path also
+            // pays BCrypt's ~50-100ms. That timing difference is itself a leak
+            // — a patient attacker enumerates registered emails by measuring
+            // latency alone, never reading a byte of the response body.
+            passwordEncoder.matches(request.password(), DUMMY_HASH_FOR_TIMING);
+            throw new InvalidCredentialsException();
+        }
+
+        User user = maybeUser.get();
+        if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+            throw new InvalidCredentialsException();
+        }
+
+        return user;
+    }
+
+    /**
+     * A syntactically valid BCrypt hash that matches no real password.
+     * {@code matches} against this costs the same ~50-100ms as a real
+     * comparison, which is the entire point — see {@link #login}.
+     */
+    private static final String DUMMY_HASH_FOR_TIMING =
+            "$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5L4mfP/EMDT1lqGKgnJKpgJH4pOb2";
 
     /**
      * Looks a user up, tolerating absence.

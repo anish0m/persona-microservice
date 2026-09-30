@@ -34,7 +34,20 @@ public record UserResponse(
         String firstName,
         String lastName,
         String username,
-        String image) {
+        String image,
+
+        /*
+         * Day-06. Included because the client genuinely needs it — a profile
+         * page that shows an "Admin" section has to know whether to render it.
+         *
+         * Safe to expose in a way the password hash is not: a role is a fact
+         * ABOUT the user, not a credential. Telling a client "you are a USER"
+         * grants nothing; the authorization decision is made server-side by
+         * SecurityConfig and @PreAuthorize regardless of what any client
+         * believes. A UI that hides the admin button is a convenience, never
+         * the enforcement.
+         */
+        String role) {
 
     /**
      * The one place a {@code User} becomes a {@code UserResponse}.
@@ -54,6 +67,7 @@ public record UserResponse(
                 user.getFirstName(),
                 user.getLastName(),
                 user.getUsername(),
-                user.getImage().orElse(null));
+                user.getImage().orElse(null),
+                user.getRole());
     }
 }

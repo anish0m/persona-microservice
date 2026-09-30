@@ -69,6 +69,41 @@
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-crypto</artifactId>
         </dependency>
+
+        <!--
+          Day-06. The wide dependency, added deliberately and late — see the
+          monolith's pom for the full reasoning. It installs the filter chain
+          that Day-05 spent a comment explaining why it did NOT want yet.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!--
+          Day-06, piece 1. jjwt: issues and validates JWTs. Same three-artifact
+          split as the monolith (api / impl-runtime / jackson-runtime) — see
+          that pom for the reasoning. Not spring-boot-starter-security yet;
+          this piece only needs email-in, signed-string-out and back.
+        -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.12.6</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+
         <!--
           Day-03. JDBC, a connection pool (HikariCP), JdbcClient, and Spring's
           DataSource auto-configuration. NOT spring-boot-starter-data-jpa — there

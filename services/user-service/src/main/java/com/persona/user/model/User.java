@@ -291,6 +291,20 @@ public class User {
     private String image;
 
     /**
+     * {@code "USER"} or {@code "ADMIN"}. <b>Day-06.</b>
+     *
+     * <p>A plain {@code String}, not a Java {@code enum} — deliberately, so
+     * this class need not be recompiled the day a third role is added. V3's
+     * {@code CHECK} constraint is where the closed set is actually enforced;
+     * this field only holds whatever that constraint allows.
+     *
+     * <p>Defaults to {@code "USER"} rather than requiring every caller to
+     * supply one — see the constructor below.
+     */
+    @Column(name = "role", nullable = false, length = 20)
+    private String role;
+
+    /**
      * For Hibernate only. <b>Day-04.</b>
      *
      * <p>Reading a row means producing a User <em>before</em> the values are
@@ -339,6 +353,7 @@ public class User {
         setFirstName(firstName);
         setLastName(lastName);
         setPasswordHash(passwordHash);
+        this.role = "USER";
     }
 
     /**
@@ -371,10 +386,43 @@ public class User {
      */
     public User(Long id, String email, String firstName, String lastName,
                 String passwordHash, String image, java.time.Instant createdAt) {
+        this(id, email, firstName, lastName, passwordHash, image, createdAt, "USER");
+    }
+
+    /**
+     * The full rehydration constructor, carrying the role. <b>Day-06.</b>
+     *
+     * <p>The six-argument form above delegates here with {@code "USER"} so
+     * every existing caller kept compiling when the role column arrived. That
+     * convenience is also a small trap worth naming: a repository that forgets
+     * to use THIS constructor silently reads every admin back as a normal
+     * user. {@link com.persona.user.repository.JdbcUserRepository} selects the
+     * column explicitly for that reason.
+     */
+    public User(Long id, String email, String firstName, String lastName,
+                String passwordHash, String image, java.time.Instant createdAt,
+                String role) {
         this(email, firstName, lastName, passwordHash);
         this.id = id;
         this.image = image;
         this.createdAt = createdAt;
+        setRole(role);
+    }
+
+    /** The stored role: {@code "USER"} or {@code "ADMIN"}. */
+    public String getRole() {
+        return role;
+    }
+
+    /**
+     * No re-implementation of V3's {@code CHECK} constraint here — this class
+     * has never duplicated a database constraint (compare {@link #email}'s
+     * {@code UNIQUE}). Only a caller that has already decided to grant admin
+     * should call this; there is no self-service path to it anywhere.
+     */
+    public void setRole(String role) {
+        requireText(role, "Role");
+        this.role = role;
     }
 
     /**

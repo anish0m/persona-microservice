@@ -2,20 +2,35 @@ package com.persona.user.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 /**
- * Supplies the one security-related bean Day-05 needs: a password encoder.
+ * Where user-service decides who may call what. <b>Day-06.</b>
  *
- * <p><b>This class does not enable Spring Security.</b> The name is chosen
- * because Day-06 will grow it, but today the project depends on
- * {@code spring-security-crypto} only — a plain library with no filters, no
- * auto-configuration and no effect on any endpoint. Adding
- * {@code spring-boot-starter-security} instead would install a
- * {@code SecurityFilterChain} that locks every URL behind a login form that
- * does not exist yet, turn all 30 existing tests red, and print a generated
- * password into the startup log. A dependency is not free because it compiles.
+ * <p><b>Through Day-05 this class did not enable Spring Security at all</b> —
+ * it supplied a {@link PasswordEncoder} and nothing else, because the service
+ * depended on {@code spring-security-crypto} (a plain library, no filters) and
+ * deliberately not on {@code spring-boot-starter-security}. That is now
+ * history, and the reason it was written is exactly why this file changed
+ * today: the starter installs a filter chain intercepting every request, which
+ * was noise on Day-05 and is the entire subject on Day-06.
+ *
+ * <h2>The microservice caveat</h2>
+ *
+ * <p>Every rule below is enforced <b>by this service, for this service</b>. In
+ * a full deployment an API Gateway would sit in front and could verify the
+ * token once at the edge — but a service that trusts the gateway to have done
+ * so is one misrouted request away from being wide open. Verifying here too is
+ * the defence-in-depth position, and it is why this config is a near-copy of
+ * the monolith's rather than being thinner.
  *
  * <h2>Why a @Configuration class rather than a field in UserService</h2>
  *
@@ -37,7 +52,120 @@ import org.springframework.security.crypto.password.PasswordEncoder;
  * </ul>
  */
 @Configuration
+@EnableMethodSecurity
 public class SecurityConfig {
+
+    private final JwtAuthenticationFilter jwtFilter;
+
+    public SecurityConfig(JwtAuthenticationFilter jwtFilter) {
+        this.jwtFilter = jwtFilter;
+    }
+
+    /**
+     * The filter chain: what is public, what needs a token, what needs a role.
+     *
+     * <p>This bean <b>replaces</b> Boot's default chain entirely. The default
+     * secures every endpoint behind a generated password printed to the
+     * startup log — the reason adding the starter without writing this method
+     * turns a working service into a 401 machine.
+     *
+     * <pre>
+     *   POST /users        permitAll   signup: there is no token yet, by definition
+     *   POST /auth/login   permitAll   login: the endpoint that ISSUES the token
+     *   GET  /users        ADMIN only  listing every account is an admin action
+     *   anything else      authenticated
+     * </pre>
+     *
+     * <p><b>The default is {@code authenticated()}, deliberately.</b>
+     * {@code anyRequest()} comes last and catches everything not named above,
+     * so a new endpoint added later is protected without anyone remembering
+     * to protect it. The opposite default fails open. <b>Order matters and
+     * first match wins</b> — reverse these and {@code anyRequest()} swallows
+     * everything.
+     *
+     * <p>{@code GET /users} is the one genuinely authorization-flavoured rule:
+     * a logged-in normal user gets <b>403</b> (we know who you are, no), while
+     * a caller with no token gets <b>401</b> (we do not know who you are).
+     */
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        return http
+                // CSRF off, safe ONLY because this API is stateless and
+                // token-based. CSRF attacks rely on the browser attaching
+                // credentials automatically — which a session cookie does and
+                // an Authorization header does not. On a cookie-authenticated
+                // app this line would be a genuine vulnerability.
+                .csrf(csrf -> csrf.disable())
+
+                // Never create an HttpSession. Without this Spring Security
+                // would create one and store the SecurityContext in it,
+                // quietly re-introducing the server-side state the JWT was
+                // chosen to avoid — and making the service unable to scale
+                // horizontally without sticky sessions. That matters more here
+                // than in the monolith: horizontal scaling is the reason the
+                // service was split out in the first place.
+                .sessionManagement(session ->
+                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+
+                .authorizeHttpRequests(auth -> auth
+                        // ERROR DISPATCHES BYPASS AUTHORIZATION. Leaving this
+                        // out produced a confusing bug no test caught: when
+                        // authorization denies a request, Spring responds 403
+                        // and Boot then FORWARDS internally to /error to build
+                        // the body. That forward re-enters this chain as a
+                        // fresh anonymous request, so /error was itself denied,
+                        // the authenticationEntryPoint fired, and it overwrote
+                        // the correct 403 with a 401 — a valid token looked
+                        // exactly like no token. The security DEBUG log is
+                        // what said so:
+                        //     AccessDeniedHandlerImpl: Responding with 403
+                        //     FilterChainProxy: Securing GET /error
+                        .dispatcherTypeMatchers(jakarta.servlet.DispatcherType.ERROR,
+                                jakarta.servlet.DispatcherType.FORWARD).permitAll()
+
+                        .requestMatchers(HttpMethod.POST, "/users").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/auth/login").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/users").hasRole("ADMIN")
+                        .anyRequest().authenticated())
+
+                // Before the username/password filter — not because this
+                // service uses form login, but because what matters is that
+                // the SecurityContext is populated before the authorization
+                // rules above are evaluated. Register it after them and every
+                // request is anonymous at decision time: a valid token returns
+                // 401, which looks like a broken token and is really a broken
+                // ordering.
+                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+
+                // No .httpBasic() and no .formLogin(). Both would add a SECOND
+                // way to authenticate, and a second way in is a second thing
+                // to secure and rate-limit. POST /auth/login is the only door.
+
+                // 401 FOR UNAUTHENTICATED, which had to be configured — found
+                // by running it, not by a test. Without this, a request with
+                // no token returned 403, not 401, because Spring picks an
+                // AuthenticationEntryPoint from the configured login
+                // mechanisms and with neither httpBasic nor formLogin there is
+                // nothing that knows how to issue a challenge — so it falls
+                // through to the access-denied path, which is 403.
+                //
+                // That inverts the distinction this day is about: 401 means "I
+                // do not know who you are, credentials may help"; 403 means "I
+                // know who you are and the answer is still no". Telling an
+                // anonymous caller 403 says retrying with a token is
+                // pointless, which is false.
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint((request, response, authException) -> {
+                            response.setStatus(HttpStatus.UNAUTHORIZED.value());
+                            response.setContentType("application/problem+json");
+                            response.getWriter().write("""
+                                    {"type":"about:blank","title":"Unauthorized",\
+                                    "status":401,\
+                                    "detail":"Authentication required"}""");
+                        }))
+
+                .build();
+    }
 
     /**
      * BCrypt at the library default cost of 10.

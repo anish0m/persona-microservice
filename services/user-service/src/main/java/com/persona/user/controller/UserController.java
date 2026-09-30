@@ -144,6 +144,26 @@ public class UserController {
     }
 
     /**
+     * The caller's own profile. {@code GET /users/me}. <b>Day-06.</b>
+     *
+     * <p><b>This exists because {@code GET /users/{email}} is the wrong shape
+     * for "show me my profile".</b> A client that must name itself in the URL
+     * has to know its own email, and — more importantly — nothing about that
+     * URL stops it naming someone <em>else's</em>. The identity here comes
+     * from the verified token instead, via the {@link java.security.Principal}
+     * that {@link com.persona.user.config.JwtAuthenticationFilter} populated.
+     * It cannot be spoofed by editing a URL, because it was never in the URL.
+     *
+     * <p>{@code Principal} rather than {@code @AuthenticationPrincipal}: it is
+     * a plain Servlet API type, so this signature does not tie the controller
+     * to Spring Security's classes.
+     */
+    @GetMapping("/me")
+    public UserResponse me(java.security.Principal principal) {
+        return UserResponse.from(service.getByEmail(principal.getName()));
+    }
+
+    /**
      * Every user. {@code GET /users}.
      *
      * <p>With no users registered this returns {@code 200 []}, not 404. The
@@ -205,11 +225,40 @@ public class UserController {
      * with a body is a protocol violation that some clients silently discard and
      * others choke on.
      */
+    @org.springframework.security.access.prepost.PreAuthorize(
+            "#email == authentication.name or hasRole('ADMIN')")
     @DeleteMapping("/{email}")
     public ResponseEntity<Void> delete(@PathVariable String email) {
         service.deleteByEmail(email);
         return ResponseEntity.noContent().build();
     }
+
+    // =================================================================
+    //  Why the rule above is an annotation and not an `if`. Day-06.
+    //
+    //  "You may delete yourself, or anyone if you are an admin" cannot be
+    //  expressed in SecurityConfig, because the URL alone does not contain
+    //  the answer — DELETE /users/a@b.com is allowed or forbidden depending
+    //  on WHO is asking. SecurityConfig matches on method and path; this
+    //  needs to compare a path variable against the authenticated principal.
+    //
+    //  @PreAuthorize runs before the method body. `#email` refers to the
+    //  parameter by name, `authentication.name` is the principal the JWT
+    //  filter set, and hasRole('ADMIN') reads the authority it granted —
+    //  stored as ROLE_ADMIN, because hasRole adds the prefix (see
+    //  JwtAuthenticationFilter.authorities for that trap in full).
+    //
+    //  One of the few places a rule legitimately lives in the controller
+    //  rather than the service, and the reason is narrow: it is a rule about
+    //  the CALLER, not about the data. UserService has never known who is
+    //  calling it.
+    //
+    //  Worth knowing: @PreAuthorize does nothing without @EnableMethodSecurity,
+    //  which is on SecurityConfig. Annotation present, feature off, no
+    //  warning — this project's recurring failure mode, and the reason the
+    //  verification script tests a forbidden delete rather than trusting the
+    //  annotation to be wired.
+    // =================================================================
 
     // =================================================================
     //  Exception translation MOVED OUT. Day-05. See GlobalExceptionHandler.

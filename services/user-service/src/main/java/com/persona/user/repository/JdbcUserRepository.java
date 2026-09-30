@@ -63,7 +63,7 @@ public class JdbcUserRepository implements UserRepository {
      * depends on.
      */
     private static final String COLUMNS =
-            "id, email, first_name, last_name, password_hash, image, created_at";
+            "id, email, first_name, last_name, password_hash, image, created_at, role";
 
     private final JdbcClient jdbc;
 
@@ -98,12 +98,13 @@ public class JdbcUserRepository implements UserRepository {
     public User save(User user) {
         try {
             return jdbc.sql("""
-                        INSERT INTO users (email, first_name, last_name, password_hash, image)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO users (email, first_name, last_name, password_hash, image, role)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         RETURNING
                         """ + COLUMNS)
                     .params(user.getEmail(), user.getFirstName(), user.getLastName(),
-                            user.getPasswordHash(), user.getImage().orElse(null))
+                            user.getPasswordHash(), user.getImage().orElse(null),
+                            user.getRole())
                     .query(JdbcUserRepository::mapRow)
                     .single();
         } catch (DuplicateKeyException e) {
@@ -269,6 +270,10 @@ public class JdbcUserRepository implements UserRepository {
                 rs.getString("last_name"),
                 rs.getString("password_hash"),
                 rs.getString("image"),
-                rs.getObject("created_at", java.time.OffsetDateTime.class).toInstant());
+                rs.getObject("created_at", java.time.OffsetDateTime.class).toInstant(),
+                // Read explicitly rather than letting the six-argument
+                // constructor default it to "USER" — relying on that default
+                // here would read every admin back as a normal user.
+                rs.getString("role"));
     }
 }
