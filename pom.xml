@@ -38,16 +38,26 @@
     </properties>
 
     <!--
-      Day-00 has exactly one service. That is deliberate: a "microservice
+      Day-00 had exactly one service. That was deliberate: a "microservice
       architecture" with one service is still a valid architecture, and it
-      keeps the slice small.
+      kept the slice small.
 
-      Later days add siblings here, each its own folder + its own pom:
-        <module>services/profile-service</module>   (later)
+      DAY-07 ADDS THE SECOND, and that is when the architecture starts
+      charging rent. With one service, "microservices" was a folder layout.
+      With two that own separate databases, it is a set of things that have
+      become impossible: no foreign key between wallets and users, no join
+      across them, and no single transaction covering signup.
+
+      `mvn test` at this level builds BOTH modules. Note what that convenience
+      hides: in production these are two deployments with two release cycles,
+      and nothing guarantees they are ever the same version at the same time.
+      The aggregator is a build-time fiction, useful and worth distrusting.
+
         <module>api-gateway</module>                (Day-17)
     -->
     <modules>
         <module>services/user-service</module>
+        <module>services/wallet-service</module>
     </modules>
 
 </project>

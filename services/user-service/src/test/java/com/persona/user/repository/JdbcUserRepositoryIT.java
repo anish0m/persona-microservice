@@ -298,13 +298,49 @@ class JdbcUserRepositoryIT {
      * rename — the query below would then be selecting a column that does not
      * exist, which is precisely the failure worth catching.
      */
+    /**
+     * Every migration on disk ran, and every one of them succeeded.
+     *
+     * <p><b>Day-07 — this assertion used to hardcode 2</b> and failed today
+     * with {@code expected: <2> but was: <3>}, because V3 added roles.
+     *
+     * <p>The test was right to notice and wrong in how it asked. A hardcoded
+     * count must be hand-edited on every migration, which means it is a
+     * maintenance tax eventually paid by bumping the number without thinking —
+     * at which point it asserts nothing. The question worth asking is not "are
+     * there three?" but <b>"did everything that exists apply, and did any of
+     * it fail?"</b>, which stays true for V4 without an edit.
+     *
+     * <p>The {@code success = false} half earns its keep: Flyway records a
+     * failed migration rather than deleting the row, so a schema can be
+     * half-applied while the application starts anyway. Counting only
+     * successes misses that entirely.
+     *
+     * <p>⚠️ <b>Note the number is 3 here and 4 in the monolith's copy of this
+     * test, and that is not a discrepancy to reconcile.</b> This service owns
+     * its own schema and its own {@code flyway_schema_history}; wallet-service
+     * has a third, starting again at V1. There is no global "version N of
+     * persona" — which also means the deployment order between services is
+     * something humans reason about rather than something Flyway can enforce.
+     */
     @Test
-    void bothMigrationsAreRecorded() {
+    void everyMigrationAppliedSuccessfully() {
+        Integer failed = jdbc.sql(
+                        "SELECT COUNT(*) FROM flyway_schema_history WHERE success = false")
+                .query(Integer.class)
+                .single();
+
+        assertEquals(0, failed, "a migration is recorded as FAILED in flyway_schema_history");
+
         Integer applied = jdbc.sql(
                         "SELECT COUNT(*) FROM flyway_schema_history WHERE success = true")
                 .query(Integer.class)
                 .single();
 
-        assertEquals(2, applied, "V1 and V2 must both be applied exactly once");
+        // Lower bound, not an exact count. V1 creates users, V2 renames the
+        // password column, V3 adds role — the three this suite's other
+        // assertions actually depend on.
+        assertTrue(applied >= 3,
+                "expected at least V1-V3 to be applied, found " + applied);
     }
 }

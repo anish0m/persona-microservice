@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      THE SECOND SERVICE. Day-07.
+
+      The aggregator's comment said "later days add siblings here, each its own
+      folder + its own pom". This is that day, and the sibling is where the
+      architecture stops being a claim and starts costing something.
+    -->
+    <parent>
+        <groupId>com.persona</groupId>
+        <artifactId>persona-microservices</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>wallet-service</artifactId>
+    <name>wallet-service</name>
+    <description>Owns everything about a persona wallet: balance, status, money movement</description>
+
+    <!--
+      ===================================================================
+      WHAT IS NOT HERE, AND WHY IT IS THE MOST IMPORTANT PART OF THIS FILE
+      ===================================================================
+
+      There is NO dependency on user-service. None. Not a shared jar, not a
+      "persona-common" module with the User class in it, nothing.
+
+      That is the single decision that makes this a microservice rather than
+      a distributed monolith, and it is worth being concrete about what it
+      forbids:
+
+        - wallet-service cannot `import com.persona.user.model.User`
+        - it cannot write `@OneToOne` to a User
+        - its migration cannot write `REFERENCES users(id)`
+        - it cannot join wallets to users in SQL
+        - it cannot participate in a transaction that also writes a user
+
+      Every one of those is available in the monolith, and all five are given
+      up together. They are not five decisions; they are one.
+
+      THE TEMPTING SHORTCUT, named so it can be refused on purpose: extract a
+      `persona-common` module holding User, Wallet and the shared DTOs, and
+      depend on it from both services. It compiles, it removes duplication,
+      and it quietly re-couples the two services at build time — now a change
+      to User forces a rebuild and redeploy of wallet-service, which is
+      exactly the property microservices exist to avoid. Shared DTOs are the
+      most common way a microservice system becomes a monolith with network
+      calls in the middle.
+
+      So wallet-service knows a user only as a `Long userId`. It cannot
+      validate that the id refers to anybody. See V1's comment for what that
+      costs and what replaces it.
+      ===================================================================
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          Validation, and the user-service pom's comment on this dependency is
+          worth re-reading here because today it stops being hypothetical:
+
+            "In a microservice the natural next step is that this service
+             passes the value to ANOTHER service, and the failure surfaces
+             over there — in a log nobody watching this deployment is reading,
+             attributed to the wrong team."
+
+          A deposit amount arrives here from user-service, not from a browser.
+          It is still validated here. A service does not get to assume its
+          caller validated, even when its caller is also you.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+          Security + jjwt, same three-artifact split as user-service.
+
+          WHY A SECOND SERVICE NEEDS ITS OWN JWT VALIDATION. The token is
+          issued by user-service and presented here. wallet-service does not
+          call user-service to ask "is this token real?" — it verifies the
+          signature itself, with the same shared secret, and that is the
+          entire appeal of a stateless token: authentication scales to N
+          services without N calls back to the issuer.
+
+          The cost is that the SECRET is now in two deployments. Rotating it
+          means rotating both, together, or every token minted by one is
+          rejected by the other. That shared secret is the coupling a
+          public/private key pair (RS256) would remove, which is a later
+          refinement and is named here so the trade is visible rather than
+          invisible.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.12.6</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+          JPA. Identical to user-service's, and that pom's comment on this
+          dependency predicted today exactly:
+
+            "in a microservice, an @Entity may only describe tables THIS
+             service owns. The moment a Wallet entity here holds a @ManyToOne
+             to a User owned by another service, the object graph crosses a
+             database boundary that does not exist — and JPA will happily let
+             you write it. The annotation cannot tell you that your
+             architecture is wrong."
+
+          Compare com.persona.wallet.model.Wallet in this service against
+          com.persona.model.Wallet in the monolith. Same class, same job; one
+          has @OneToOne User and one has a bare Long. That diff IS Day-07.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+          Flyway — AND ITS OWN MIGRATION HISTORY.
+
+          This service's migrations start at V1 even though user-service also
+          has a V1. They are different databases, so they have different
+          flyway_schema_history tables and the version numbers are independent.
+
+          Worth internalising, because it is the schema-level statement of the
+          whole architecture: there is no global "version 4 of persona". Each
+          service versions its own schema, and the deployment order between
+          them is a thing humans have to reason about rather than a thing
+          Flyway can enforce.
+        -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <!-- Boot 4 split: FlywayAutoConfiguration ships here, not in
+             spring-boot-autoconfigure. Without it Flyway is on the classpath,
+             silent, and never runs. See user-service's pom for how that was
+             found the hard way. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Test.java</include>
+                        <include>**/*IT.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
