@@ -57,7 +57,8 @@ import jakarta.persistence.Table;
  *
  * <p>This entity may only describe tables <b>this service owns</b>. That sounds
  * obvious and is the single easiest boundary to destroy, because JPA makes
- * crossing it pleasant: adding {@code @ManyToOne Wallet wallet} here would
+ * crossing it pleasant: adding a {@code @ManyToOne} to an entity owned
+ * elsewhere would
  * compile, generate a join, and work perfectly — against a database that, after
  * Day-17, belongs to a different service.
  *

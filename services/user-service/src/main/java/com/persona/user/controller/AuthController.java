@@ -1,6 +1,5 @@
 package com.persona.user.controller;
 
-import com.persona.user.client.WalletClient;
 import com.persona.user.config.JwtService;
 import com.persona.user.config.TokenDenyList;
 import com.persona.user.dto.LoginRequest;
@@ -37,30 +36,11 @@ public class AuthController {
     private final JwtService jwtService;
     private final TokenDenyList denyList;
 
-    /**
-     * The first dependency in this project that is <b>another running
-     * process</b>. <b>Day-07.</b>
-     *
-     * <p>Every other field here is a bean in this JVM: calling one cannot time
-     * out, cannot be refused, and cannot be a different version than expected.
-     * This one can do all three, which is why {@link WalletClient} is a hundred
-     * lines of timeouts and retry around a single POST.
-     *
-     * <p>Worth noticing in the constructor signature itself: nothing about the
-     * type tells you that. {@code WalletClient} looks exactly like
-     * {@code UserService} from here, and that symmetry is the thing to
-     * distrust — <b>a network call disguised as a method call is the most
-     * common way a distributed system acquires a failure mode nobody
-     * planned.</b>
-     */
-    private final WalletClient walletClient;
-
     public AuthController(UserService service, JwtService jwtService,
-                          TokenDenyList denyList, WalletClient walletClient) {
+                          TokenDenyList denyList) {
         this.service = service;
         this.jwtService = jwtService;
         this.denyList = denyList;
-        this.walletClient = walletClient;
     }
 
     /**
@@ -85,57 +65,13 @@ public class AuthController {
     public TokenResponse login(@Valid @RequestBody LoginRequest request) {
         User user = service.login(request);
 
-        // Day-07: the token now carries the user's id and role as well as
-        // their email. wallet-service needs both, has no users table to look
-        // either up in, and the alternative is an HTTP call back to this
-        // service on every single request it serves. See JwtService.issueToken
-        // for what that buys and what it costs (a stale role for up to one
-        // token lifetime).
+        // The token carries the user's id and role as well as their email, so
+        // that any other service receiving it can authenticate and authorise
+        // without an HTTP call back to this one. See JwtService.issueToken for
+        // what that buys and what it costs (a stale role for up to one token
+        // lifetime).
         String token = jwtService.issueToken(user.getEmail(), user.getId(), user.getRole());
 
-        // ===================================================================
-        //  THE WALLET IS OPENED HERE, AT LOGIN — NOT AT SIGNUP.
-        //
-        //  In the monolith it happens during registration, inside the same
-        //  @Transactional as the user INSERT. That is the natural place and it
-        //  is NOT AVAILABLE in this build, for a reason that only appears once
-        //  the code is actually written:
-        //
-        //    wallet-service requires an authenticated caller. At signup there
-        //    is no token — the user is not logged in yet, that is the entire
-        //    point of signing up — so user-service has nothing to present, and
-        //    the call is rejected with a 401.
-        //
-        //  Three ways out, and the trade in each:
-        //
-        //    (a) make POST /wallets/me public — deletes the authorization on
-        //        an endpoint that creates rows. No.
-        //    (b) service-to-service credentials, so user-service authenticates
-        //        AS ITSELF rather than on behalf of a user. This is the right
-        //        answer and it needs a credential-issuing mechanism that does
-        //        not exist yet. Day-17, with the gateway.
-        //    (c) open the wallet at first login, when a token exists.
-        //
-        //  (c) is what is implemented, and it is a COMPROMISE rather than a
-        //  design: it means a registered user who never logs in has no wallet,
-        //  and it moves a side effect into an endpoint whose job is
-        //  authentication. Both are wrong in a small way, and the alternative
-        //  was wrong in a large way.
-        //
-        //  WHAT THIS IS REALLY SHOWING: the monolith's ordering was free
-        //  because a method call needs no permission. The moment the call
-        //  crosses a service boundary it needs authorization, and the
-        //  authorization is not available at the point the business logic
-        //  wants to make the call. That is a genuinely new class of problem,
-        //  it has nothing to do with wallets, and no amount of care in the
-        //  domain model prevents it.
-        //
-        //  Idempotent on the far side, so logging in a hundred times opens one
-        //  wallet. The return value is deliberately ignored: a failure here
-        //  must not fail a login that has already succeeded. WalletClient logs
-        //  it, loudly.
-        // ===================================================================
-        walletClient.createWalletFor(user.getId(), token);
 
         return TokenResponse.bearer(token);
     }

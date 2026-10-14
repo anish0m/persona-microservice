@@ -126,7 +126,7 @@
 
           Where they will diverge is Day-17, and it is worth naming now: in a
           microservice, an @Entity may only describe tables THIS service owns.
-          The moment a Wallet entity here holds a @ManyToOne to a User owned by
+          The moment an entity here holds a @ManyToOne to something owned by
           another service, the object graph crosses a database boundary that does
           not exist — and JPA will happily let you write it. The annotation
           cannot tell you that your architecture is wrong.

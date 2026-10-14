@@ -54,24 +54,25 @@ public class JwtService {
     }
 
     /**
-     * <b>Day-07 — the token now carries the user id and role as claims.</b>
+     * <b>The token carries the user id and role as claims.</b>
      *
-     * <p>Until today it carried only the email, and that was sufficient:
-     * {@code JwtAuthenticationFilter} looked the user up in this service's own
-     * database to find their role, so the token only had to say <em>who</em>.
+     * <p>It could carry only the email, and within this service that is
+     * sufficient: {@code JwtAuthenticationFilter} can look the user up in this
+     * service's own database to find their role, so the token only has to say
+     * <em>who</em>.
      *
-     * <p>wallet-service broke that. It receives the same token, needs the
-     * user's id to find their wallet and their role to enforce
-     * {@code hasRole('ADMIN')} — and <b>it has no users table to look either
-     * one up in.</b> Its only options are to call user-service on every single
-     * request, or to read the facts out of the token.
+     * <p>A second service breaks that. It receives the same token, needs the
+     * user's id and their role to enforce {@code hasRole('ADMIN')} — and <b>it
+     * has no users table to look either one up in.</b> Its only options are to
+     * call user-service on every single request, or to read the facts out of
+     * the token.
      *
      * <p>So the token becomes the carrier of what a shared database used to
      * supply. That is a real pattern and a real trade:
      *
      * <ul>
-     *   <li><b>Gained:</b> wallet-service authenticates and authorises with
-     *       zero network calls. Authentication scales to N services without N
+     *   <li><b>Gained:</b> a receiving service authenticates and authorises
+     *       with zero network calls. Authentication scales to N services without N
      *       round trips back to the issuer. This is the entire appeal of a
      *       stateless token.</li>
      *   <li><b>Lost:</b> the claims are a <em>snapshot</em>. Demote an admin to
@@ -98,7 +99,7 @@ public class JwtService {
         return Jwts.builder()
                 .subject(email)
 
-                // Day-07. The two facts wallet-service cannot look up itself.
+                // The two facts another service cannot look up itself.
                 // `uid` and `role` are custom (private) claims — the JWT spec
                 // reserves a handful of names like sub/iat/exp/jti and leaves
                 // the rest to the application.

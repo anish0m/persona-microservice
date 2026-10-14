@@ -10,9 +10,9 @@ package com.persona.user.exception;
  *
  * <p><b>What is different here, and it is the important part.</b> This exception
  * cannot leave user-service. A Java exception is a JVM construct; it does not
- * travel over HTTP. When wallet-service asks user-service about a user who does
- * not exist, what it receives is a <em>404 status code</em>, and it is
- * wallet-service's job to decide what that means to it. This class is how
+ * travel over HTTP. When another service asks user-service about a user who
+ * does not exist, what it receives is a <em>404 status code</em>, and it is
+ * that service's job to decide what that means to it. This class is how
  * user-service represents the failure internally, right up to the boundary where
  * Day-09 translates it into a status code.
  *

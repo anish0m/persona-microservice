@@ -8,7 +8,7 @@
  * credentials. Cross-service data is fetched via API, never via a shared JOIN.
  *
  * <p>The monolith has the opposite freedom - one database, and a report query can
- * JOIN users to wallets in a single statement. Simpler, until the day two teams
+ * JOIN across every table in a single statement. Simpler, until the day two teams
  * want to change the same table.
  */
 package com.persona.user.repository;

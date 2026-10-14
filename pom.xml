@@ -42,22 +42,22 @@
       architecture" with one service is still a valid architecture, and it
       kept the slice small.
 
-      DAY-07 ADDS THE SECOND, and that is when the architecture starts
-      charging rent. With one service, "microservices" was a folder layout.
+      THE DAY A SECOND SERVICE ARRIVES is when the architecture starts
+      charging rent. With one service, "microservices" is a folder layout.
       With two that own separate databases, it is a set of things that have
-      become impossible: no foreign key between wallets and users, no join
-      across them, and no single transaction covering signup.
+      become impossible: no foreign key across the boundary, no join across
+      it, and no single transaction covering an operation that spans both.
 
-      `mvn test` at this level builds BOTH modules. Note what that convenience
-      hides: in production these are two deployments with two release cycles,
-      and nothing guarantees they are ever the same version at the same time.
-      The aggregator is a build-time fiction, useful and worth distrusting.
+      `mvn test` at this level builds EVERY module. Note what that convenience
+      hides: in production these are separate deployments with separate release
+      cycles, and nothing guarantees they are ever the same version at the same
+      time. The aggregator is a build-time fiction, useful and worth
+      distrusting.
 
         <module>api-gateway</module>                (Day-17)
     -->
     <modules>
         <module>services/user-service</module>
-        <module>services/wallet-service</module>
     </modules>
 
 </project>

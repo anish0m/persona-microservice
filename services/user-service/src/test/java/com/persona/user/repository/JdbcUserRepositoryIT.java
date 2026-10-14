@@ -316,12 +316,12 @@ class JdbcUserRepositoryIT {
      * half-applied while the application starts anyway. Counting only
      * successes misses that entirely.
      *
-     * <p>⚠️ <b>Note the number is 3 here and 4 in the monolith's copy of this
-     * test, and that is not a discrepancy to reconcile.</b> This service owns
-     * its own schema and its own {@code flyway_schema_history}; wallet-service
-     * has a third, starting again at V1. There is no global "version N of
-     * persona" — which also means the deployment order between services is
-     * something humans reason about rather than something Flyway can enforce.
+     * <p>⚠️ <b>Each service owns its own schema and its own
+     * {@code flyway_schema_history}</b>, so counts here are not comparable with
+     * another service's — a second service starts again at V1. There is no
+     * global "version N of persona", which also means the deployment order
+     * between services is something humans reason about rather than something
+     * Flyway can enforce.
      */
     @Test
     void everyMigrationAppliedSuccessfully() {
