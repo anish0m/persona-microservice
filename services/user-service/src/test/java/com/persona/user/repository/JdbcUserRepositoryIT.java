@@ -8,10 +8,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -342,5 +346,143 @@ class JdbcUserRepositoryIT {
         // assertions actually depend on.
         assertTrue(applied >= 3,
                 "expected at least V1-V3 to be applied, found " + applied);
+    }
+
+    // ---- Day-09: paging against real SQL --------------------------------
+
+    private void saveUsers(int count) {
+        for (int i = 0; i < count; i++) {
+            repository.save(new User(
+                    "user" + i + "@example.com", "First", "Last", "Pass1234#"));
+        }
+    }
+
+    /**
+     * {@code LIMIT} bounds the rows; the separate {@code COUNT(*)} describes the
+     * table.
+     *
+     * <p>This is the assertion that fails if the count is ever taken from the
+     * limited query instead of its own statement — {@code totalElements} would
+     * come back as 2 and {@code getTotalPages()} would report 1, with nothing
+     * throwing.
+     */
+    @Test
+    void aPageIsLimitedButTheTotalDescribesTheWholeTable() {
+        saveUsers(5);
+
+        Page<User> page = repository.findAll(PageRequest.of(0, 2));
+
+        assertEquals(2, page.getContent().size());
+        assertEquals(5, page.getTotalElements());
+        assertEquals(3, page.getTotalPages());
+    }
+
+    /**
+     * {@code OFFSET} skips, and the ordering makes "skip" mean something.
+     *
+     * <p>Ordered by {@code id}, which the database assigns in insertion order,
+     * so page 1 holds the third and fourth users saved. Without the
+     * {@code ORDER BY} this assertion would be undefined behaviour that happens
+     * to pass on small tables — which is exactly how this bug survives into
+     * production.
+     */
+    @Test
+    void offsetSkipsEarlierRowsInIdOrder() {
+        saveUsers(5);
+
+        List<String> secondPage = repository.findAll(PageRequest.of(1, 2))
+                .getContent().stream().map(User::getEmail).toList();
+
+        assertEquals(List.of("user2@example.com", "user3@example.com"), secondPage);
+    }
+
+    /**
+     * <b>The {@code ORDER BY} is load-bearing, and this is the test that proves
+     * it.</b>
+     *
+     * <p>Written because deleting {@code ORDER BY id} from the paged query left
+     * every other test in this class green. Freshly inserted rows sit in the heap
+     * in insertion order, so an unordered {@code LIMIT}/{@code OFFSET} returns
+     * them in id order by luck — the assertions passed while asserting nothing.
+     * That is precisely the bug reaching production: correct on the developer's
+     * five rows, wrong once the table has seen updates.
+     *
+     * <p>The setup breaks the coincidence. An {@code UPDATE} in PostgreSQL does
+     * not edit in place — MVCC writes a new row version and leaves the old one
+     * dead, so the updated row moves to the <em>end</em> of the heap. Updating
+     * the first user therefore makes physical order and id order disagree, and
+     * only a query that really sorts can still answer correctly.
+     */
+    @Test
+    void pagingStillOrdersByIdAfterAnUpdateMovesARowInTheHeap() {
+        saveUsers(5);
+
+        // Rewrites user0's row version and relocates it to the end of the heap.
+        User first = repository.getByEmail("user0@example.com");
+        first.setFirstName("Moved");
+        repository.update(first);
+
+        List<String> firstPage = repository.findAll(PageRequest.of(0, 2))
+                .getContent().stream().map(User::getEmail).toList();
+
+        // Without ORDER BY, user0 now comes back last and this page would be
+        // user1 + user2.
+        assertEquals(List.of("user0@example.com", "user1@example.com"), firstPage);
+    }
+
+    @Test
+    void everyRowIsSeenExactlyOnceAcrossAllPages() {
+        saveUsers(5);
+
+        List<String> seen = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            repository.findAll(PageRequest.of(i, 2))
+                    .forEach(u -> seen.add(u.getEmail()));
+        }
+
+        assertEquals(5, seen.size());
+        assertEquals(5, Set.copyOf(seen).size());
+    }
+
+    /** Past the end PostgreSQL returns no rows; the total still describes the table. */
+    @Test
+    void aPageBeyondTheEndIsEmpty() {
+        saveUsers(3);
+
+        Page<User> page = repository.findAll(PageRequest.of(99, 10));
+
+        assertTrue(page.getContent().isEmpty());
+        assertEquals(3, page.getTotalElements());
+    }
+
+    @Test
+    void anEmptyTablePagesToAnEmptyPage() {
+        Page<User> page = repository.findAll(PageRequest.of(0, 20));
+
+        assertTrue(page.getContent().isEmpty());
+        assertEquals(0, page.getTotalElements());
+    }
+
+    /**
+     * Paging does not change what a row contains.
+     *
+     * <p>Worth asserting because the paged query is a <em>second</em> hand-written
+     * SELECT in this class, with its own column list. A column dropped from it
+     * would leave every other test passing and silently null out a field only on
+     * the list endpoint.
+     */
+    @Test
+    void aPagedRowCarriesEveryFieldJustAsFindByEmailDoes() {
+        repository.save(anishom());
+
+        User fromPage = repository.findAll(PageRequest.of(0, 10))
+                .getContent().getFirst();
+
+        assertEquals("khi0ne@example.com", fromPage.getEmail());
+        assertEquals("Anishom", fromPage.getFirstName());
+        assertEquals("Frost", fromPage.getLastName());
+        assertEquals("USER", fromPage.getRole());
+        assertNotNull(fromPage.getId());
+        assertNotNull(fromPage.getCreatedAt());
     }
 }

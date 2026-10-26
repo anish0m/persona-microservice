@@ -3,9 +3,13 @@ package com.persona.user.repository;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -161,6 +165,49 @@ public class InMemoryUserRepository implements UserRepository {
      */
     public Collection<User> findAll() {
         return List.copyOf(usersByEmail.values());
+    }
+
+    /**
+     * One page of users, from a {@link ConcurrentHashMap}.
+     *
+     * <p><b>A map has no order, so one has to be imposed.</b> The real
+     * implementations order by {@code id} because {@code LIMIT}/{@code OFFSET}
+     * is meaningless without it. This fake must do the same or it is not a
+     * substitute: paging an unordered collection returns arbitrary overlapping
+     * subsets, and a test written against it would pass while asserting
+     * nonsense.
+     *
+     * <p><b>Ordering by email, not id — and that is a deliberate divergence.</b>
+     * In this profile {@code id} is null: nothing assigns one, because no
+     * database is involved. Email is the map key, so it is unique and always
+     * present. The ordering therefore differs from the JDBC and JPA
+     * implementations, which means <em>a test asserting which specific users
+     * land on page 2 is only valid against the profile it ran on</em>. What is
+     * safely assertable everywhere: page sizes, the total, and that pages do not
+     * overlap.
+     *
+     * <p><b>Two arithmetic traps, both silent.</b> {@code getOffset()} returns a
+     * {@code long} while {@code List.subList} takes {@code int}, so a cast is
+     * unavoidable; and the offset may be past the end of the list, where
+     * {@code subList} throws {@code IndexOutOfBoundsException} rather than
+     * returning empty. Both are handled by clamping below — an out-of-range page
+     * yields an empty page with the correct total, matching what SQL
+     * {@code OFFSET} past the end does.
+     *
+     * <p><b>The total is taken before slicing</b>, for the same reason as in the
+     * JDBC version: {@code totalElements} describes the table, not the page.
+     */
+    @Override
+    public Page<User> findAll(Pageable pageable) {
+        List<User> ordered = usersByEmail.values().stream()
+                .sorted(Comparator.comparing(User::getEmail))
+                .toList();
+
+        int total = ordered.size();
+        int from = (int) Math.min(pageable.getOffset(), total);
+        int to = Math.min(from + pageable.getPageSize(), total);
+
+        return new PageImpl<>(ordered.subList(from, to), pageable, total);
     }
 
     public long count() {

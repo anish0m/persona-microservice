@@ -5,12 +5,16 @@ import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -219,6 +223,69 @@ public class JdbcUserRepository implements UserRepository {
                 .query(JdbcUserRepository::mapRow)
                 .list();
     }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p><b>This method is the reason the JDBC profile is worth keeping.</b> The
+     * JPA implementation of the same thing is one delegated line, which makes
+     * {@code Page} look like a free gift. Here every part of it has to be typed
+     * out, and what appears is that <b>one page costs two queries</b>:
+     *
+     * <pre>
+     *   1.  SELECT ... ORDER BY id LIMIT ? OFFSET ?     the rows
+     *   2.  SELECT COUNT(*) FROM users                  the total
+     * </pre>
+     *
+     * Spring Data was always issuing both. It simply never said so.
+     *
+     * <p><b>ORDER BY is not decoration — it is required for correctness.</b>
+     * {@code LIMIT}/{@code OFFSET} without {@code ORDER BY} is undefined in
+     * PostgreSQL: the planner may return rows in any order, so "skip 20 take 10"
+     * can hand back rows already seen on page 1 and never show others at all.
+     * Ordering by {@code id} is chosen because it is unique; ordering by a
+     * non-unique column (say {@code last_name}) would need a tiebreaker for the
+     * same reason.
+     *
+     * <p><b>The count is taken separately and deliberately not inside the first
+     * query.</b> A windowed {@code COUNT(*) OVER ()} would fold both into one
+     * round trip, but it computes the count from the full result set before
+     * limiting, and here it would return the count of the <em>page</em> rather
+     * than of the table unless written carefully. Two plain statements are
+     * slower and obviously correct, which at this scale is the better trade.
+     *
+     * <p><b>Why the count comes second.</b> It is the total <em>before</em>
+     * paging, so it must not inherit {@code LIMIT}. Getting this backwards —
+     * counting the returned rows — yields a {@code totalElements} that equals
+     * the page size, and {@code getTotalPages()} then confidently reports 1.
+     * Nothing throws; the number is simply wrong.
+     *
+     * <p><b>No {@code @Transactional} here, and that is a real gap.</b> The two
+     * statements run in separate auto-commit transactions, so a row inserted
+     * between them produces a page of 10 with a total of 11 — internally
+     * inconsistent by a hair. Annotating the method would close it. It is left
+     * open to match the rest of this class, which is unannotated throughout, and
+     * flagged rather than hidden.
+     */
+    @Override
+    public Page<User> findAll(Pageable pageable) {
+        List<User> rows = jdbc.sql(
+                        "SELECT " + COLUMNS + " FROM users ORDER BY id LIMIT ? OFFSET ?")
+                .params(pageable.getPageSize(), pageable.getOffset())
+                .query(JdbcUserRepository::mapRow)
+                .list();
+
+        long total = count();
+
+        return new PageImpl<>(rows, pageable, total);
+    }
+
+    /**
+     * <p>{@code COUNT(*)} is computed by the database over the index; the row data
+     * never leaves it. Counting in Java would mean transferring every row across
+     * the network to call {@code .size()} on the result — the general rule being
+     * to send the question to the data rather than the data to the question.
+     */
 
     /**
      * <p>{@code COUNT(*)} is computed by the database over the index; the row data

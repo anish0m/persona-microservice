@@ -4,6 +4,8 @@ import com.persona.user.model.User;
 
 import java.util.Collection;
 import java.util.Optional;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 /**
  * What the application can ask of user storage — and nothing about how.
@@ -91,7 +93,49 @@ public interface UserRepository {
     /** @throws com.persona.user.exception.UserNotFoundException if nothing was deleted */
     void deleteByEmail(String email);
 
+    /**
+     * Every user, unbounded. <b>Kept, but no longer what the HTTP layer calls.</b>
+     *
+     * <p>Honest about its own danger: the result grows with the table. Fine for
+     * tests and for {@link #count}-style internal work, wrong for an endpoint.
+     * {@link #findAll(Pageable)} is the one the controller uses now.
+     */
     Collection<User> findAll();
+
+    /**
+     * One page of users. <b>Day-09.</b>
+     *
+     * <p><b>Why this method exists.</b> {@code GET /users} called
+     * {@link #findAll()} and serialised the lot. With a hundred rows that is
+     * invisible; with a million it loads a million objects into heap to answer
+     * one request. The fix is not a bigger machine — it is to stop asking the
+     * question. A page is a bounded question.
+     *
+     * <p><b>Why {@code Page} and not {@code List}.</b> A list of ten users cannot
+     * tell the caller whether there are ninety more. {@code Page} carries the
+     * rows <em>and</em> the total, which is what a UI needs to draw "page 3 of
+     * 7". That total is not free — see the implementations, where it is a second
+     * database round trip.
+     *
+     * <p><b>The cost this signature accepts.</b> {@code Page} and {@code Pageable}
+     * are Spring Data types, so this port — which has been deliberately free of
+     * storage vocabulary, see the class note above — now names a persistence
+     * library. A stricter reading would define a {@code PersonaPage} record here
+     * and translate at each implementation. That is real isolation and real
+     * ceremony; the judgement taken is that {@code Pageable} describes
+     * <em>pagination</em>, a concept the domain genuinely has, rather than
+     * describing a database. Worth knowing it is a judgement and not a free win.
+     *
+     * <p><b>A known limit, stated rather than hidden.</b> This is offset
+     * pagination: page 2 is "skip 20, take 10". Each request is its own
+     * transaction, so a user inserted between request 1 and request 2 shifts
+     * every later row one place — a row can be seen twice or missed entirely. No
+     * isolation level fixes it, because there is no transaction spanning the two
+     * requests. Keyset pagination ("everything after id 57") does fix it, at the
+     * cost of losing random page access. For an admin list of users, drift is
+     * survivable and random access is useful, so offset is the right trade here.
+     */
+    Page<User> findAll(Pageable pageable);
 
     long count();
 }

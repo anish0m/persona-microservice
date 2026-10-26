@@ -6,6 +6,9 @@ import com.persona.user.dto.UserResponse;
 import com.persona.user.model.User;
 import com.persona.user.service.UserService;
 import jakarta.validation.Valid;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -164,25 +167,52 @@ public class UserController {
     }
 
     /**
-     * Every user. {@code GET /users}.
+     * One page of users. {@code GET /users?page=0&size=20&sort=id,asc}.
+     * <b>Admin only</b> — see {@code SecurityConfig}, which requires
+     * {@code ROLE_ADMIN} on this route.
      *
-     * <p>With no users registered this returns {@code 200 []}, not 404. The
-     * collection exists and happens to be empty — that is a successful answer to a
-     * well-formed question. 404 would claim {@code /users} itself is not a thing.
+     * <p>With no users registered this returns {@code 200} with an empty
+     * {@code content} array, not 404. The collection exists and happens to be
+     * empty — a successful answer to a well-formed question. 404 would claim
+     * {@code /users} itself is not a thing. These are the HTTP equivalents of
+     * {@code Optional.empty()} versus {@code UserNotFoundException}: <b>empty is
+     * not an error.</b>
      *
-     * <p>These are the HTTP equivalents of {@code Optional.empty()} versus
-     * {@code UserNotFoundException}: <b>empty is not an error.</b>
+     * <p><b>Day-09 changed this endpoint, and the change is breaking.</b> It
+     * previously returned every row as a bare JSON array. It now returns a page
+     * object:
      *
-     * <p>Returns a plain {@code List} rather than {@code ResponseEntity}. When the
-     * status is 200 and there are no custom headers, the object alone says
-     * everything; {@code ResponseEntity} earns its verbosity only when you need the
-     * start line or the headers, as {@link #create} does.
+     * <pre>
+     *   before:  [ {...}, {...} ]
+     *   after:   { "content": [ {...}, {...} ],
+     *              "totalElements": 42, "totalPages": 3, "number": 0, ... }
+     * </pre>
+     *
+     * The old shape could not survive a large table — it loaded every user into
+     * heap to answer one request — and no amount of client-side slicing fixes a
+     * query that already read everything. Any caller reading the array directly
+     * has to read {@code content} instead.
+     *
+     * <p><b>Where {@code Pageable} comes from.</b> Nothing parses the query
+     * string here. Spring resolves the parameter from {@code page}, {@code size}
+     * and {@code sort}, applying defaults when they are absent, and caps
+     * {@code size} at a configured maximum so a caller cannot ask for a million
+     * rows and reintroduce the very problem this fixes.
+     *
+     * <p><b>The default sort matters.</b> With no {@code sort} parameter the
+     * order is whatever the store returns, and paging an unordered result can
+     * repeat or skip rows across pages. {@code @PageableDefault} pins it to
+     * {@code id} so the default request is correct rather than merely usual.
+     *
+     * <p>Returns the {@code Page} rather than {@code ResponseEntity}: status is
+     * 200 and there are no custom headers, so the object alone says everything.
+     * {@code ResponseEntity} earns its verbosity only when the start line or the
+     * headers matter, as {@link #create} does.
      */
     @GetMapping
-    public List<UserResponse> findAll() {
-        return service.findAll().stream()
-                .map(UserResponse::from)
-                .toList();
+    public Page<UserResponse> findAll(
+            @PageableDefault(size = 20, sort = "id") Pageable pageable) {
+        return service.findAll(pageable).map(UserResponse::from);
     }
 
     /**

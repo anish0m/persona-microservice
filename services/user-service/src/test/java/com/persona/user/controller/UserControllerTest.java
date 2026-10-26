@@ -10,6 +10,11 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -221,25 +226,100 @@ class UserControllerTest {
                 .andExpect(jsonPath("$.detail").exists());
     }
 
-    /** An empty collection is a successful answer: {@code 200 []}, never 404. */
+    /**
+     * An empty page is a successful answer: {@code 200} with empty
+     * {@code content}, never 404.
+     */
     @Test
-    void listingWithNoUsersReturns200AndEmptyArray() throws Exception {
-        when(service.findAll()).thenReturn(List.of());
+    void listingWithNoUsersReturns200AndEmptyContent() throws Exception {
+        when(service.findAll(any(Pageable.class)))
+                .thenReturn(Page.empty());
 
         mockMvc.perform(get("/users"))
                 .andExpect(status().isOk())
-                .andExpect(content().json("[]"));
+                .andExpect(jsonPath("$.content").isArray())
+                .andExpect(jsonPath("$.content.length()").value(0))
+                .andExpect(jsonPath("$.totalElements").value(0));
     }
 
     @Test
-    void listingReturnsEveryUser() throws Exception {
-        when(service.findAll()).thenReturn(List.of(anishom()));
+    void listingReturnsAPageOfUsers() throws Exception {
+        when(service.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(anishom()),
+                        PageRequest.of(0, 20), 1));
 
         mockMvc.perform(get("/users"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$[0].email").value("khi0ne@example.com"))
-                .andExpect(jsonPath("$[0].password").doesNotExist());
+                .andExpect(jsonPath("$.content.length()").value(1))
+                .andExpect(jsonPath("$.content[0].email").value("khi0ne@example.com"))
+                .andExpect(jsonPath("$.content[0].password").doesNotExist());
+    }
+
+    /**
+     * <b>The Day-09 shape change, asserted deliberately.</b> The response used to
+     * be a bare JSON array; it is now an object carrying the rows under
+     * {@code content} plus the totals a UI needs to draw "page 3 of 7".
+     *
+     * <p>This test exists to make the break loud. Without it, a later refactor
+     * could quietly return to an array and every other test here would still
+     * pass — they read {@code $.content[0]}, which simply would not match, and
+     * {@code jsonPath} on a missing path fails for reasons that do not name the
+     * cause.
+     */
+    @Test
+    void listingReturnsAPageObjectRatherThanABareArray() throws Exception {
+        when(service.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(anishom()),
+                        PageRequest.of(0, 20), 42));
+
+        mockMvc.perform(get("/users"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isMap())
+                .andExpect(jsonPath("$.totalElements").value(42))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.number").value(0));
+    }
+
+    /**
+     * The query string reaches the service as a {@link Pageable}. Nothing in the
+     * controller parses it — Spring resolves {@code page} and {@code size} — so
+     * what is verified is that the resolved values are the ones asked for and
+     * are passed through rather than ignored.
+     */
+    @Test
+    void pageAndSizeFromTheQueryStringReachTheService() throws Exception {
+        when(service.findAll(any(Pageable.class))).thenReturn(Page.empty());
+
+        mockMvc.perform(get("/users").param("page", "2").param("size", "5"))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(service).findAll(captor.capture());
+
+        assertEquals(2, captor.getValue().getPageNumber());
+        assertEquals(5, captor.getValue().getPageSize());
+    }
+
+    /**
+     * With no query string the defaults from {@code @PageableDefault} apply, and
+     * the sort is pinned to {@code id}.
+     *
+     * <p>The sort assertion is the one worth having: an unsorted page is not
+     * merely untidy, it is incorrect, because {@code LIMIT}/{@code OFFSET} over
+     * an unordered result can repeat rows on one page and skip them on the next.
+     */
+    @Test
+    void defaultsApplyWhenNoPagingParametersAreGiven() throws Exception {
+        when(service.findAll(any(Pageable.class))).thenReturn(Page.empty());
+
+        mockMvc.perform(get("/users")).andExpect(status().isOk());
+
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(service).findAll(captor.capture());
+
+        assertEquals(0, captor.getValue().getPageNumber());
+        assertEquals(20, captor.getValue().getPageSize());
+        assertEquals(Sort.by("id"), captor.getValue().getSort());
     }
 
     @Test

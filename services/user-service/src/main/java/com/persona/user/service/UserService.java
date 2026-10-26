@@ -8,6 +8,8 @@ import com.persona.user.exception.InvalidCredentialsException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import com.persona.user.repository.UserRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -335,6 +337,29 @@ public class UserService {
      */
     public Collection<User> findAll() {
         return repository.findAll();
+    }
+
+    /**
+     * One page of users, for the admin list. <b>Day-09.</b>
+     *
+     * <p><b>Why {@code readOnly = true} on a method that only delegates.</b> It
+     * is not about preventing writes — it does not prevent them. Under JPA it
+     * sets {@code FlushMode.MANUAL} and skips dirty checking, so Hibernate does
+     * not snapshot every loaded entity to compare at flush time. On a page of
+     * users that is pure saving.
+     *
+     * <p><b>And it governs because this is where the transaction starts.</b>
+     * Propagation is {@code REQUIRED}, which means the first transaction to
+     * begin wins and everything joining it inherits its settings. The
+     * repository's own {@code @Transactional(readOnly = true)} then joins this
+     * one rather than opening a second. Were this method unannotated, the
+     * repository would start its own — which still works, and is exactly the
+     * habit that breaks the moment a second repository call is added here: two
+     * calls, two transactions, two snapshots, two answers that need not agree.
+     */
+    @Transactional(readOnly = true)
+    public Page<User> findAll(Pageable pageable) {
+        return repository.findAll(pageable);
     }
 
     public long count() {

@@ -6,9 +6,15 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -301,5 +307,92 @@ class JpaUserRepositoryIT {
                 .single();
 
         assertEquals(60, length, "V2's column width must match the entity mapping");
+    }
+
+    // ---- Day-09: paging through Spring Data -----------------------------
+
+    private void saveUsers(int count) {
+        for (int i = 0; i < count; i++) {
+            repository.save(new User(
+                    "user" + i + "@example.com", "First", "Last", "Pass1234#"));
+        }
+    }
+
+    /**
+     * The inherited {@code findAll(Pageable)} bounds the rows and still reports
+     * the full total.
+     *
+     * <p><b>What this proves that the unit tests cannot:</b> that Spring Data
+     * really does issue two statements. {@code totalElements} of 5 alongside two
+     * returned rows is only possible if a separate {@code COUNT(*)} ran — the
+     * limited query cannot know about the other three.
+     *
+     * <p>Note the class-level {@code @Transactional}: both statements run inside
+     * this test's transaction rather than each opening their own, and the whole
+     * thing rolls back at the end. That is what makes {@code saveUsers} safe
+     * here without an explicit cleanup.
+     */
+    @Test
+    void aPageIsLimitedButTheTotalDescribesTheWholeTable() {
+        saveUsers(5);
+
+        Page<User> page = repository.findAll(PageRequest.of(0, 2));
+
+        assertEquals(2, page.getContent().size());
+        assertEquals(5, page.getTotalElements());
+        assertEquals(3, page.getTotalPages());
+    }
+
+    /**
+     * The sort carried by the {@code Pageable} reaches the generated SQL.
+     *
+     * <p>Sorting by email descending is chosen precisely because it is <em>not</em>
+     * the insertion order: if the {@code Sort} were dropped on the way through,
+     * the rows would come back in id order and this would fail. A test sorted by
+     * id could not tell the difference.
+     */
+    @Test
+    void theSortInThePageableIsAppliedByTheDatabase() {
+        saveUsers(3);
+
+        List<String> emails = repository
+                .findAll(PageRequest.of(0, 3, Sort.by("email").descending()))
+                .getContent().stream().map(User::getEmail).toList();
+
+        assertEquals(List.of("user2@example.com",
+                             "user1@example.com",
+                             "user0@example.com"), emails);
+    }
+
+    @Test
+    void everyRowIsSeenExactlyOnceAcrossAllPages() {
+        saveUsers(5);
+
+        List<String> seen = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            repository.findAll(PageRequest.of(i, 2, Sort.by("id")))
+                    .forEach(u -> seen.add(u.getEmail()));
+        }
+
+        assertEquals(5, seen.size());
+        assertEquals(5, Set.copyOf(seen).size());
+    }
+
+    @Test
+    void aPageBeyondTheEndIsEmpty() {
+        saveUsers(3);
+
+        Page<User> page = repository.findAll(PageRequest.of(99, 10));
+
+        assertTrue(page.getContent().isEmpty());
+        assertEquals(3, page.getTotalElements());
+    }
+
+    @Test
+    void anEmptyTablePagesToAnEmptyPage() {
+        Page<User> page = repository.findAll(PageRequest.of(0, 20));
+
+        assertTrue(page.getContent().isEmpty());
+        assertEquals(0, page.getTotalElements());
     }
 }

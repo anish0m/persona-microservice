@@ -7,6 +7,8 @@ import jakarta.persistence.EntityManager;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -281,18 +283,62 @@ public class JpaUserRepository implements UserRepository {
     /**
      * {@inheritDoc}
      *
-     * <p><b>Known debt, and it is the same debt in all three implementations:</b>
-     * this loads every row into memory. Fine at a hundred users, fatal at a
-     * million. Spring Data makes the fix nearly free — {@code findAll(Pageable)}
-     * is already inherited and needs no code — but taking it means changing
-     * {@link UserRepository} and therefore the service and the controller, which
-     * is a deliberate slice of its own rather than something smuggled in here.
+     * <p><b>The debt this comment used to describe was paid on Day-09.</b> It
+     * said: this loads every row into memory, fine at a hundred users and fatal
+     * at a million, and the fix means changing {@link UserRepository} and
+     * therefore the service and the controller — "a deliberate slice of its
+     * own". That slice happened. {@link #findAll(Pageable)} below is what
+     * {@code GET /users} calls now.
+     *
+     * <p>This unbounded version survives because tests and internal callers
+     * legitimately want "all of them" against a table known to be small. The
+     * danger was never the method; it was exposing it to HTTP.
      */
     @Override
     @Transactional(readOnly = true)
     public Collection<User> findAll() {
         return users.findAll();
     }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p><b>The whole implementation is a delegation, and that is the point.</b>
+     * {@code SpringDataUserRepository extends JpaRepository}, and
+     * {@code PagingAndSortingRepository} contributes {@code findAll(Pageable)}
+     * for free. No query to write, no {@code @Query}, no mapping.
+     *
+     * <p><b>What that one line actually does, which is worth not taking for
+     * granted.</b> It issues <em>two</em> statements, not one:
+     *
+     * <pre>
+     *   SELECT ... FROM users ORDER BY ... LIMIT ? OFFSET ?   &lt;- the page
+     *   SELECT COUNT(*) FROM users                            &lt;- the total
+     * </pre>
+     *
+     * The count is what makes {@code getTotalPages()} answerable, and it is a
+     * full scan unless an index serves it. At persona's scale that is free. The
+     * JDBC implementation writes both statements by hand, which is the clearest
+     * demonstration in this codebase of what {@code Page} costs — see
+     * {@link JdbcUserRepository#findAll(Pageable)}.
+     *
+     * <p><b>If the total were not needed</b>, returning {@code Slice} instead
+     * would skip the count entirely and answer only "is there another page?".
+     * For an admin screen that wants "page 3 of 7", the count is the feature.
+     *
+     * <p>{@code readOnly = true} for the same reason as the other reads here —
+     * Hibernate sets {@code FlushMode.MANUAL} and skips dirty checking, so no
+     * snapshot of these entities is taken for comparison at flush time. Note it
+     * only governs if this transaction is the one that <em>starts</em>; called
+     * from an outer read-write transaction it would silently join that one
+     * instead.
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public Page<User> findAll(Pageable pageable) {
+        return users.findAll(pageable);
+    }
+
 
     /** {@inheritDoc} — {@code SELECT COUNT(*)}; no rows are loaded. */
     @Override
