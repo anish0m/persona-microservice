@@ -10,6 +10,7 @@ import com.persona.user.model.User;
 import com.persona.user.repository.UserRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -86,6 +87,47 @@ public class UserService {
     public UserService(UserRepository repository, PasswordEncoder passwordEncoder) {
         this.repository = repository;
         this.passwordEncoder = passwordEncoder;
+        // Default so that `new UserService(...)` in a plain unit test behaves
+        // exactly as it did before Day-10 — see the field's javadoc.
+        this.self = this;
+    }
+
+    /**
+     * This same bean, as seen through Spring's transactional proxy.
+     * <b>Day-10.</b>
+     *
+     * <p>Needed because {@link #updateProfile} retries by calling
+     * {@link #attemptUpdateProfile}, and that call must cross the proxy to get
+     * a NEW transaction on each attempt. An ordinary {@code this.} call goes
+     * straight to the method body, skipping the interceptor {@code
+     * @Transactional} relies on, so the retry would run with no transaction at
+     * all — silently, which is the worst kind of wrong.
+     *
+     * <p><b>Why a setter and not a constructor parameter.</b> A class cannot be
+     * handed itself at construction time; Spring resolves it lazily. Injecting
+     * it in the constructor would also break the promise the constructor's own
+     * javadoc makes — that {@code new UserService(repository, encoder)} is a
+     * valid line in a plain JUnit test with no application context. Those tests
+     * still construct this class directly, and the constructor defaults
+     * {@code self} to {@code this} so they keep working unchanged.
+     *
+     * <p>The honest alternative is a separate collaborator holding the retry,
+     * which removes the self-reference entirely. For one method that is more
+     * structure than the problem deserves.
+     */
+    private UserService self;
+
+    /**
+     * Lets Spring replace the default self-reference with the proxied bean.
+     *
+     * <p>{@code @Autowired(required = false)} and {@code @Lazy} together: the
+     * laziness breaks the circular dependency this would otherwise create, and
+     * {@code required = false} keeps a unit-test instance valid when there is
+     * no context to inject from.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSelf(@org.springframework.context.annotation.Lazy UserService self) {
+        this.self = self;
     }
 
     /**
@@ -215,8 +257,68 @@ public class UserService {
      *       paying out.</li>
      * </ul>
      */
-    @Transactional
     public User updateProfile(String email, UpdateProfileRequest request) {
+        // Day-10. The retry loop, and why it is OUT HERE rather than inside
+        // the transactional method below.
+        //
+        // User now carries @Version, so a profile update that loses a race is
+        // rejected with ObjectOptimisticLockingFailureException instead of
+        // silently overwriting the winner. Detection alone is half a fix:
+        // without this loop a person who did nothing wrong gets an error
+        // because somebody else saved a fraction of a second earlier.
+        //
+        // In this architecture the conflict is not hypothetical. user-service
+        // is meant to run as several instances behind the Day-17 gateway, so
+        // the two racing requests may not even be in the same JVM — which is
+        // also why the guard is a database column rather than a lock object.
+        //
+        // THE RETRY CANNOT LIVE INSIDE attemptUpdateProfile. By the time the
+        // exception surfaces that transaction is already rollback-only: the
+        // conflicting UPDATE matched zero rows and Hibernate abandoned the
+        // persistence context. Catching it in there and looping would re-read
+        // through a doomed transaction. A retry needs a FRESH transaction, so
+        // the loop sits outside the transactional boundary and calls back in
+        // through the injected self-reference — an ordinary this.method() call
+        // would bypass the proxy and silently run with no transaction at all.
+        //
+        // Three attempts, not more: a conflict means a human saved at the same
+        // instant, which is rare and does not repeat. Hitting this limit is a
+        // signal to investigate contention, not to raise the number.
+        ObjectOptimisticLockingFailureException lastConflict = null;
+
+        for (int attempt = 1; attempt <= MAX_UPDATE_ATTEMPTS; attempt++) {
+            try {
+                return self.attemptUpdateProfile(email, request);
+            } catch (ObjectOptimisticLockingFailureException conflict) {
+                // Deliberately no sleep: the winner has already committed, so
+                // the next read sees fresh data immediately. A backoff would
+                // be the right call for a DEADLOCK retry, which is a different
+                // failure with a different cure.
+                lastConflict = conflict;
+            }
+        }
+
+        throw lastConflict;
+    }
+
+    /**
+     * The maximum number of times a profile update is retried after losing an
+     * optimistic-locking race. <b>Day-10.</b>
+     */
+    private static final int MAX_UPDATE_ATTEMPTS = 3;
+
+    /**
+     * One attempt at the update, in its own transaction. <b>Day-10.</b>
+     *
+     * <p>Public rather than private because Spring's transaction support is a
+     * proxy, and a proxy can only intercept a call arriving from outside the
+     * object. A private method, or a plain {@code this.} call, runs with no
+     * transaction and the {@code @Transactional} below is silently ignored.
+     *
+     * <p>Callers should use {@link #updateProfile}, which adds the retry.
+     */
+    @Transactional
+    public User attemptUpdateProfile(String email, UpdateProfileRequest request) {
         User user = repository.getByEmail(email);
 
         user.setFirstName(request.firstName());

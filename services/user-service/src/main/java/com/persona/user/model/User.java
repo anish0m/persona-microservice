@@ -306,6 +306,68 @@ public class User {
     private String role;
 
     /**
+     * The optimistic-locking counter. <b>Day-10.</b> Hibernate owns this field
+     * completely; nothing in the application may read or write it.
+     *
+     * <p><b>What it buys.</b> Before today, two people editing one profile at
+     * the same moment produced a LOST UPDATE: both read the row, both changed a
+     * field, both wrote, and the second write silently erased the first. It was
+     * demonstrated against the real database in
+     * {@link com.persona.user.repository.UserConcurrencyIT} before this field
+     * existed — both writes reported success and one person's edit vanished.
+     *
+     * <p>With this annotation present, every UPDATE Hibernate generates carries
+     * the version it read:
+     *
+     * <pre>
+     * UPDATE users SET first_name = ?, ..., version = 6 WHERE id = ? AND version = 5
+     * </pre>
+     *
+     * <p>The writer holding a stale snapshot matches <b>zero rows</b>, and
+     * Hibernate converts that into
+     * {@code ObjectOptimisticLockingFailureException}. The check and the write
+     * are one statement, so there is no gap for a competitor to slip into.
+     *
+     * <p><b>Why this is not optional in THIS architecture.</b> user-service is
+     * meant to be scaled horizontally — several instances behind the Day-17
+     * gateway, all sharing one database and nothing else. Any guard held in
+     * application memory ({@code synchronized}, a lock object, a local cache) is
+     * scoped to a single JVM and is completely invisible to the other instances,
+     * so it would appear to work in every test and protect nothing in
+     * production. The database is the only thing all instances agree on, which
+     * is why the guard has to live in a column. The monolithic build reaches the
+     * same conclusion by a weaker argument; here there is no alternative at all.
+     *
+     * <p><b>It DETECTS, it does not PREVENT.</b> The losing update fails loudly
+     * rather than quietly succeeding. That is better than a silent wrong answer
+     * and is not the same as being safe: without a retry, a person who did
+     * nothing wrong sees an error because somebody else saved first. The retry
+     * in {@code UserService.updateProfile} is the other half of this change.
+     *
+     * <p><b>Why {@code Long} and not {@code long}.</b> Same reason as
+     * {@link #id}: an unsaved User has no version, and {@code null} is how that
+     * is said. Hibernate uses null-versus-not-null to tell a new entity from a
+     * detached one, so a primitive would make every unsaved object look like an
+     * existing row at version 0.
+     *
+     * <p><b>No getter, no setter, deliberately.</b> There is nothing the
+     * application can correctly do with this value, and a getter invites a
+     * caller to ship it to a client and send it back — a different design, with
+     * a different failure mode. Hibernate reaches the field by reflection and
+     * needs neither accessor.
+     *
+     * <p><b>What this does NOT protect.</b> Only writes that go through
+     * Hibernate's dirty checking. The JDBC implementation of
+     * {@link com.persona.user.repository.UserRepository} issues its own UPDATE
+     * and knows nothing about this column, so it is unprotected — V4's
+     * {@code DEFAULT 0} exists precisely so that path keeps working. The
+     * protection follows the mapping, not the table.
+     */
+    @jakarta.persistence.Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
+    /**
      * For Hibernate only. <b>Day-04.</b>
      *
      * <p>Reading a row means producing a User <em>before</em> the values are

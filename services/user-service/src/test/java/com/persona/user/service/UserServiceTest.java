@@ -5,6 +5,7 @@ import com.persona.user.dto.UpdateProfileRequest;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import com.persona.user.repository.InMemoryUserRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -300,5 +301,96 @@ class UserServiceTest {
     void updatingAMissingUserThrows() {
         assertThrows(UserNotFoundException.class, () -> service.updateProfile(
                 "nobody@example.com", new UpdateProfileRequest("A", "B", null)));
+    }
+    /**
+     * A profile update that loses one optimistic-locking race is retried and
+     * succeeds. <b>Day-10.</b>
+     *
+     * <p><b>This test exists because a mutation survived.</b> After
+     * {@code @Version} was added and {@code UserConcurrencyIT} was proving the
+     * race is detected, {@code MAX_UPDATE_ATTEMPTS} was lowered from 3 to 1 —
+     * which removes the retry entirely and makes every losing writer see an
+     * error. The whole suite stayed green: <b>90/90, BUILD SUCCESS</b>. The ITs
+     * drive {@code repository.update} directly, so nothing anywhere exercised
+     * the loop in {@link UserService#updateProfile}.
+     *
+     * <p>That is the half of Day-10 worth keeping. {@code @Version} DETECTS the
+     * lost update; the retry is what stops the detection from being paid for by
+     * a blameless user. Shipping the first without the second trades a silent
+     * bug for a visible one, and until this test existed only the first half was
+     * protected by the build.
+     *
+     * <p>No database is needed to prove it. The repository is a stub that throws
+     * {@link ObjectOptimisticLockingFailureException} on its first
+     * {@code update} and succeeds afterwards, which is exactly what a lost race
+     * looks like from the service's point of view.
+     */
+    @Test
+    void aProfileUpdateThatLosesOneRaceIsRetriedAndSucceeds() {
+        ConflictOnceRepository repository = new ConflictOnceRepository(1);
+        UserService retrying = new UserService(repository, encoder);
+        retrying.register(signupRequest());
+
+        User updated = retrying.updateProfile("khi0ne@example.com",
+                new UpdateProfileRequest("Retried", "Frost", null));
+
+        assertEquals("Retried", updated.getFirstName());
+        assertEquals(2, repository.updateAttempts(),
+                "the first attempt should have conflicted and a second been made");
+    }
+
+    /**
+     * Sustained contention is not retried forever — after the limit the
+     * exception reaches the caller.
+     *
+     * <p>Without this, {@link #aProfileUpdateThatLosesOneRaceIsRetriedAndSucceeds}
+     * would also pass against an infinite loop, which would turn a conflict
+     * into a hang. The pair pins the behaviour from both sides: retry a
+     * collision, give up on a crowd.
+     */
+    @Test
+    void anUpdateThatKeepsLosingEventuallyGivesUp() {
+        ConflictOnceRepository repository = new ConflictOnceRepository(99);
+        UserService retrying = new UserService(repository, encoder);
+        retrying.register(signupRequest());
+
+        assertThrows(ObjectOptimisticLockingFailureException.class,
+                () -> retrying.updateProfile("khi0ne@example.com",
+                        new UpdateProfileRequest("Never", "Frost", null)));
+
+        assertEquals(3, repository.updateAttempts(),
+                "should stop after MAX_UPDATE_ATTEMPTS rather than looping forever");
+    }
+
+    /**
+     * An {@link InMemoryUserRepository} that loses the first {@code n}
+     * optimistic-locking races.
+     *
+     * <p>Subclassing the real in-memory repository rather than writing a mock
+     * keeps every other method honest — register, getByEmail and the rest behave
+     * exactly as they do in the other tests in this class, and only the one
+     * behaviour under test is altered.
+     */
+    private static final class ConflictOnceRepository extends InMemoryUserRepository {
+
+        private final int conflictsToThrow;
+        private int attempts;
+
+        private ConflictOnceRepository(int conflictsToThrow) {
+            this.conflictsToThrow = conflictsToThrow;
+        }
+
+        @Override
+        public User update(User user) {
+            attempts++;
+            if (attempts <= conflictsToThrow) {
+                throw new ObjectOptimisticLockingFailureException(User.class, user.getEmail());
+            }
+            return super.update(user);
+        }
+
+        private int updateAttempts() {
+            return attempts;
+        }
     }
 }

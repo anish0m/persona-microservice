@@ -1,0 +1,62 @@
+-- ===========================================================================
+--  V4 — optimistic locking for the users table. Day-10.
+--
+--  WHAT THIS COLUMN IS FOR.
+--
+--  Two people updating one profile at the same instant is a LOST UPDATE: both
+--  read the row, both change a field, both write, and the second write
+--  silently erases the first. Neither request is wrong on its own, which is
+--  why no amount of reading a single request's code reveals it, and why the
+--  90 tests that existed before today were all green while it was possible.
+--
+--  This column is the condition that makes the second write fail. Hibernate
+--  appends `AND version = <the value that was read>` to every UPDATE and
+--  increments the column. The writer whose snapshot is stale matches ZERO
+--  rows, and Hibernate turns "0 rows updated" into
+--  ObjectOptimisticLockingFailureException.
+--
+--  It is an ATOMIC CONDITIONAL UPDATE: ask and act in one statement, so there
+--  is no gap between the check and the write for a competitor to slip into.
+--  The condition is just `version = 5` rather than something about the data.
+--
+--  WHY THIS MATTERS MORE HERE THAN IN THE MONOLITH.
+--
+--  This is the microservice build, and user-service is designed to be run as
+--  MORE THAN ONE INSTANCE behind the gateway that arrives on Day-17. The
+--  monolith can at least be reasoned about as a single JVM; a horizontally
+--  scaled service cannot. Two instances serving two requests share nothing
+--  except this database, so no amount of in-process synchronisation —
+--  synchronized, a ReentrantLock, a local cache — can coordinate them. An
+--  application-level lock is scoped to one JVM and is invisible to the other.
+--
+--  That is the real argument for putting the guard in the DATABASE: it is the
+--  only thing both instances agree on. The same reasoning will apply again
+--  when this service is deployed more than once in the same compose file.
+--
+--  WHY DEFAULT 0 AND NOT NULL.
+--
+--  Existing rows need a value that compares correctly on the very next
+--  UPDATE. NULL would be fatal rather than untidy: in SQL `version = NULL` is
+--  UNKNOWN, never true, so every pre-existing row would become permanently
+--  unwritable — every update matching zero rows and throwing.
+--
+--  The DEFAULT also covers writers Hibernate knows nothing about. This
+--  service still ships a hand-written JDBC implementation of UserRepository
+--  whose INSERT does not name this column, and psql sessions do not either.
+--
+--  BIGINT rather than INTEGER: the extra 4 bytes per row are cheaper than a
+--  wrap-around that silently makes two different versions compare equal.
+--
+--  WHAT THIS DOES NOT DO.
+--
+--  It does not PREVENT the lost update — it DETECTS it. The losing writer
+--  gets an exception instead of silently winning, which converts a silent
+--  wrong answer into a loud failure. That is strictly better and is not the
+--  same as being safe: without a retry, somebody who did nothing wrong sees
+--  an error. The retry is the other half and lives in UserService.
+-- ===========================================================================
+
+ALTER TABLE users ADD COLUMN version BIGINT NOT NULL DEFAULT 0;
+
+COMMENT ON COLUMN users.version IS
+    'Optimistic-locking counter. Hibernate adds "AND version = ?" to every UPDATE and increments it; a stale writer matches no rows and is rejected with ObjectOptimisticLockingFailureException. Never write this column by hand.';
