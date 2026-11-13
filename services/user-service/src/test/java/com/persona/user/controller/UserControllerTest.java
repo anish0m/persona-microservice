@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -105,6 +106,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * covers that, by asking a real server rather than a mock.
  */
 @WebMvcTest(UserController.class)
+@org.springframework.context.annotation.Import(UserControllerTest.IdempotencyTestConfig.class)
 @org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc(addFilters = false)
 class UserControllerTest {
 
@@ -124,6 +126,56 @@ class UserControllerTest {
 
     @MockitoBean
     private com.persona.user.repository.UserRepository userRepository;
+
+    /**
+     * Day-11. A REAL {@code IdempotencyService} over the in-memory store, not a
+     * {@code @MockitoBean}.
+     *
+     * <p><b>Why not a mock.</b> Every POST in this class goes through
+     * {@code create}, and a mocked {@code execute} returns null by default — so
+     * a mock would turn every unrelated assertion into a NullPointerException
+     * and would then have to be stubbed to pass its own argument through, which
+     * is a hand-written implementation wearing a mock's clothes.
+     *
+     * <p>The real object costs nothing here: without an {@code Idempotency-Key}
+     * header, {@code create} never calls it, so the existing tests exercise
+     * exactly the path they always did.
+     *
+     * <p><b>And note what this cannot prove, which matters more in this build
+     * than in the monolith.</b> The fake's claim is atomic because a
+     * {@code ConcurrentHashMap} says so — within one JVM. user-service runs as
+     * several instances, so in production the duplicate is very likely being
+     * handled by a different process entirely, and no in-heap structure can see
+     * it. The guarantee is tested in {@code JdbcIdempotencyRepositoryIT},
+     * against the primary key, which is the only thing all instances share.
+     */
+    @org.springframework.boot.test.context.TestConfiguration
+    static class IdempotencyTestConfig {
+
+        @org.springframework.context.annotation.Bean
+        com.persona.user.repository.InMemoryIdempotencyRepository idempotencyRepository() {
+            return new com.persona.user.repository.InMemoryIdempotencyRepository();
+        }
+
+        @org.springframework.context.annotation.Bean
+        com.persona.user.service.IdempotencyService idempotencyService(
+                com.persona.user.repository.InMemoryIdempotencyRepository repository) {
+            return new com.persona.user.service.IdempotencyService(repository);
+        }
+    }
+
+    @Autowired
+    private com.persona.user.repository.InMemoryIdempotencyRepository idempotencyStore;
+
+    /**
+     * Day-11. The store is a context-scoped singleton, so it outlives a test
+     * method. Without this, tests sharing a key would see each other's claims
+     * and fail depending on execution order.
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void clearIdempotencyKeys() {
+        idempotencyStore.clear();
+    }
 
     private User anishom() {
         return new User("khi0ne@example.com", "Anishom", "Frost", "Pass1234#");
@@ -580,5 +632,230 @@ class UserControllerTest {
                 .andExpect(jsonPath("$.errors.firstName").exists());
 
         verifyNoInteractions(service);
+    }
+    // =================================================================
+    //  DAY-11 — Idempotency-Key.
+    //
+    //  Every test below counts calls to service.register() rather than
+    //  reading a status code, and that is the whole point of them.
+    //
+    //  A replay and a fresh call return the SAME body and the SAME 201.
+    //  So a test that asserts "status is 201 and email is x" passes
+    //  identically whether the work ran once or twice — it cannot tell the
+    //  two worlds apart, which is exactly the shape of a green test that
+    //  proves nothing. times(1) is the assertion; the status code is
+    //  corroboration.
+    // =================================================================
+
+    private static final String KEY = "a6c0f1e2-signup-retry";
+
+    @Test
+    void aRetryWithTheSameKeyDoesNotRegisterTwice() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        mockMvc.perform(post("/users")
+                        .header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_JSON))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(post("/users")
+                        .header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_JSON))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.email").value("khi0ne@example.com"))
+                .andExpect(jsonPath("$.username").value("@anishom-frost"));
+
+        // The assertion. Without it, both calls returning 201 with the same
+        // body is equally consistent with the signup having run twice.
+        verify(service, times(1)).register(any(CreateUserRequest.class));
+    }
+
+    /**
+     * The replay returns the stored status, not a freshly chosen one.
+     *
+     * <p>Asserted separately from the body because they can diverge: an
+     * implementation that rebuilt the response from the user row would get the
+     * body right and quietly answer 200 where the original answered 201.
+     */
+    @Test
+    void aReplayRestoresTheOriginalStatusCode() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON));
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    void withoutAKeyEveryCallRunsTheSignup() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        for (int i = 0; i < 2; i++) {
+            mockMvc.perform(post("/users")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(VALID_JSON))
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist("Idempotent-Replay"));
+        }
+
+        // The key is OPTIONAL, so its absence must leave Day-05's behaviour
+        // exactly as it was. A test that only covered the keyed path would not
+        // notice an implementation that deduplicated everything.
+        verify(service, times(2)).register(any(CreateUserRequest.class));
+    }
+
+    @Test
+    void differentKeysAreDifferentRequests() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", "key-A")
+                .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON));
+        mockMvc.perform(post("/users").header("Idempotency-Key", "key-B")
+                .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON));
+
+        verify(service, times(2)).register(any(CreateUserRequest.class));
+    }
+
+    /**
+     * A reused key with a different body is 422, and the second request must
+     * not run.
+     *
+     * <p>Both halves matter. Returning 422 while still having registered the
+     * second user would be worse than either failure alone — the client is told
+     * its request was rejected and the row exists anyway.
+     */
+    @Test
+    void reusingAKeyWithADifferentBodyIs422AndRunsNothing() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON))
+                .andExpect(status().isCreated());
+
+        String differentPerson = """
+                {
+                  "email": "khi0ne@example.com",
+                  "firstName": "Someone",
+                  "lastName": "Else",
+                  "password": "Pass1234#"
+                }
+                """;
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(differentPerson))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.title").value("Idempotency Key Reused"))
+                .andExpect(jsonPath("$.retryable").value(false));
+
+        verify(service, times(1)).register(any(CreateUserRequest.class));
+    }
+
+    /**
+     * The key is not echoed back into the response.
+     *
+     * <p>A promise made in the handler's javadoc, turned into something that can
+     * fail. Reflecting a client-supplied header into a response body is the
+     * shape log-injection and XSS bugs are made of, and the client already knows
+     * the key it sent.
+     */
+    @Test
+    void theRejectionDoesNotEchoTheKey() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON));
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_JSON.replace("Anishom", "Other")))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString(KEY))));
+    }
+
+    /**
+     * A duplicate email is recorded as the answer and replayed.
+     *
+     * <p>A failure is an answer: run the signup again in an hour and the email
+     * is still taken. So the second call must get the same 409 <em>without</em>
+     * re-running the work — which is the branch that distinguishes a recordable
+     * business failure from an infrastructure fault.
+     */
+    @Test
+    void aDuplicateEmailIsStoredAndReplayedWithoutRerunning() throws Exception {
+        when(service.register(any(CreateUserRequest.class)))
+                .thenThrow(new DuplicateEmailException("khi0ne@example.com"));
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON))
+                .andExpect(status().isConflict());
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON))
+                .andExpect(status().isConflict());
+
+        verify(service, times(1)).register(any(CreateUserRequest.class));
+    }
+
+    /**
+     * An unrecognised failure releases the key so the client can retry.
+     *
+     * <p>The tombstone test. If the claim survived an infrastructure fault, the
+     * key would be stuck IN_PROGRESS forever: every retry gets 409 and the real
+     * answer never arrives for anybody, for a request that is not wrong.
+     */
+    @Test
+    void anInfrastructureFailureReleasesTheKey() throws Exception {
+        // NOT IllegalStateException, which this project already maps to 409 —
+        // picking it made the test fail on the status assertion while the
+        // behaviour under test was fine. A fault with no handler of its own is
+        // what "infrastructure failure" has to mean here.
+        when(service.register(any(CreateUserRequest.class)))
+                .thenThrow(new org.springframework.dao.TransientDataAccessResourceException(
+                        "connection reset"))
+                .thenReturn(anishom());
+
+        // No @ExceptionHandler covers this type, so MockMvc rethrows rather
+        // than rendering a status. That is fine for what is being proved here:
+        // the claim must be released whatever the transport does with the
+        // error, and the SECOND call's 201 is the evidence.
+        org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () ->
+                mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON)));
+
+        mockMvc.perform(post("/users").header("Idempotency-Key", KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON))
+                .andExpect(status().isCreated())
+                .andExpect(header().doesNotExist("Idempotent-Replay"));
+
+        // times(2) is the whole assertion: the key was NOT left IN_PROGRESS, so
+        // the retry ran the work instead of being told 409 forever.
+        verify(service, times(2)).register(any(CreateUserRequest.class));
+    }
+
+    /**
+     * A blank key is treated as no key at all.
+     *
+     * <p>{@code Idempotency-Key: } with an empty value would otherwise become a
+     * real key that every client sending a blank header shares — the collision
+     * the scoping rule exists to prevent, arriving by accident.
+     */
+    @Test
+    void aBlankKeyIsIgnoredRatherThanSharedBetweenClients() throws Exception {
+        when(service.register(any(CreateUserRequest.class))).thenReturn(anishom());
+
+        for (int i = 0; i < 2; i++) {
+            mockMvc.perform(post("/users").header("Idempotency-Key", "   ")
+                            .contentType(MediaType.APPLICATION_JSON).content(VALID_JSON))
+                    .andExpect(status().isCreated());
+        }
+
+        verify(service, times(2)).register(any(CreateUserRequest.class));
     }
 }

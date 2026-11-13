@@ -36,4 +36,30 @@ public class DuplicateEmailException extends RuntimeException {
     public String getEmail() {
         return email;
     }
+
+    /**
+     * Whether this failure's response is worth storing for replay.
+     * <b>Day-11.</b>
+     *
+     * <p><b>Why a business failure is recorded and an infrastructure failure is
+     * not.</b> A taken email is a settled answer: run the signup again in an
+     * hour and it is still taken, so replaying the stored 409 to a retry is both
+     * correct and cheaper than redoing the work. A dropped connection is not an
+     * answer — the work might well succeed on a second attempt — so there the
+     * idempotency key must be released rather than answered.
+     *
+     * <p><b>And the distinction is less academic in this build than in the
+     * monolith.</b> The failures a user-service call can suffer include a whole
+     * category the monolith does not have: the gateway timing out, an instance
+     * being drained mid-request, a connection reset between hops. Those are
+     * transient by nature, and treating them as settled answers would record a
+     * network hiccup as a permanent verdict on the request.
+     *
+     * <p>Note that this method says nothing about <em>what</em> the response is.
+     * No status code, no JSON. Whether a failure is final is a domain fact;
+     * rendering it as a 409 is the controller's job.
+     */
+    public boolean isFinal() {
+        return true;
+    }
 }

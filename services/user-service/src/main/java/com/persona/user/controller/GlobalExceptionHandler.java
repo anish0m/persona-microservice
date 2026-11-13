@@ -1,7 +1,9 @@
 package com.persona.user.controller;
 
 import com.persona.user.exception.DuplicateEmailException;
+import com.persona.user.exception.DuplicateRequestException;
 import com.persona.user.exception.InvalidCredentialsException;
+import com.persona.user.exception.RequestInProgressException;
 import com.persona.user.exception.UserNotFoundException;
 import jakarta.validation.ConstraintViolationException;
 import org.springframework.http.HttpStatus;
@@ -230,6 +232,61 @@ public class GlobalExceptionHandler {
                 HttpStatus.CONFLICT, e.getMessage());
         problem.setTitle("Conflict");
         problem.setProperty("email", e.getEmail());
+        return problem;
+    }
+
+    /**
+     * 409 Conflict — a retry arrived while the original is still running.
+     * <b>Day-11.</b>
+     *
+     * <p><b>Shares a status code with the handler above and means something
+     * different by it.</b> That is not sloppiness: 409 says "this conflicts with
+     * the current state", and both a taken email and an in-flight twin are
+     * states the request collides with. What separates them for a client is the
+     * {@code retryable} property. A duplicate email will still be a duplicate in
+     * ten seconds; an in-flight request will not still be in flight.
+     *
+     * <p><b>And in this build the client reading that flag is very often not a
+     * person.</b> The gateway, a sibling service, a retrying HTTP client — they
+     * cannot read a title and decide what it means, so a machine-readable
+     * {@code retryable} is the difference between a sensible backoff and either
+     * a hammering retry loop or a request abandoned that would have succeeded.
+     *
+     * <p>The key is <b>not</b> echoed as a property. The client generated it, so
+     * returning it adds nothing, and a header value reflected into a response
+     * body is the shape log-injection bugs are made of.
+     */
+    @ExceptionHandler(RequestInProgressException.class)
+    public ProblemDetail handleInProgress(RequestInProgressException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.CONFLICT, e.getMessage());
+        problem.setTitle("Request In Progress");
+        problem.setProperty("retryable", true);
+        return problem;
+    }
+
+    /**
+     * 422 Unprocessable Content — an idempotency key reused with a different
+     * body. <b>Day-11.</b>
+     *
+     * <p><b>422 rather than 400, and the distinction is the one worth learning
+     * from this pair.</b> The request is syntactically perfect — header present,
+     * JSON parses, every field valid — so the validation handlers above would
+     * never fire on it. What is wrong is the <em>relationship</em> between this
+     * request and an earlier one, which no amount of inspecting this request
+     * alone could reveal. 400 is about the bytes; 422 is about the meaning.
+     *
+     * <p>{@code retryable} is {@code false} here where the handler above sets it
+     * true. Resending identical bytes under the same key produces this same
+     * refusal forever, and telling a client to retry something that cannot
+     * succeed is worse than saying nothing, because it will.
+     */
+    @ExceptionHandler(DuplicateRequestException.class)
+    public ProblemDetail handleKeyReuse(DuplicateRequestException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage());
+        problem.setTitle("Idempotency Key Reused");
+        problem.setProperty("retryable", false);
         return problem;
     }
 

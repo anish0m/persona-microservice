@@ -1,9 +1,21 @@
 package com.persona.user.controller;
 
+// Jackson 3, not 2. This project is on tools.jackson 3.1.5 (via
+// spring-boot-starter-jackson 4.1.1), where ObjectMapper moved package and the
+// checked JsonProcessingException became the unchecked JacksonException.
+//
+// Worth knowing how the wrong import fails, because it does not fail where it
+// should: jackson-annotations 2.x is on the compile classpath as a transitive,
+// so `import com.fasterxml...ObjectMapper` COMPILES, and databind 2.x is
+// present only at RUNTIME via jjwt. The error is NoClassDefFoundError at bean
+// creation, in tests that have nothing to do with Jackson.
+import tools.jackson.databind.ObjectMapper;
 import com.persona.user.dto.CreateUserRequest;
 import com.persona.user.dto.UpdateProfileRequest;
 import com.persona.user.dto.UserResponse;
+import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.model.User;
+import com.persona.user.service.IdempotencyService;
 import com.persona.user.service.UserService;
 import jakarta.validation.Valid;
 import org.springframework.data.domain.Page;
@@ -16,6 +28,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -66,8 +79,35 @@ public class UserController {
      */
     private final UserService service;
 
-    public UserController(UserService service) {
+    /**
+     * Day-11. Runs signup at most once per {@code Idempotency-Key}.
+     *
+     * <p>Injected at the controller rather than inside {@link UserService} on
+     * purpose. The service's rule is "may this person exist?"; de-duplicating a
+     * retried HTTP request is not a question about users at all. Idempotency is
+     * a property of the transport, so it is wired at the transport — and that
+     * placement is what keeps the service callable from a future gRPC or
+     * message-driven entry point that has its own delivery semantics.
+     */
+    private final IdempotencyService idempotency;
+
+    /**
+     * Day-11. Serialises the response body so it can be stored and replayed.
+     *
+     * <p>The stored body must be the <em>rendered</em> response, byte for byte,
+     * or a replay is not indistinguishable from the original — which is the
+     * entire promise. Re-deriving it from the user row would also break the
+     * moment the row changes: a replay returns what the first call returned,
+     * not what the same call would return now.
+     */
+    private final ObjectMapper json;
+
+    public UserController(UserService service,
+                          IdempotencyService idempotency,
+                          ObjectMapper json) {
         this.service = service;
+        this.idempotency = idempotency;
+        this.json = json;
     }
 
     /**
@@ -91,9 +131,104 @@ public class UserController {
      * controller, and next year's admin bulk-import and mobile endpoint do not go
      * through this method. The service throws; this class only decides what that
      * means in HTTP. See {@link com.persona.user.controller.GlobalExceptionHandler}.
+     *
+     * <h2>Day-11 — and in a distributed system the paragraph above is a problem</h2>
+     *
+     * <p>POST is still not idempotent as a method, and here that is not a
+     * property of the client's behaviour — it is a property of the deployment.
+     * A client that gets no answer cannot tell "it never arrived" from "it
+     * worked and the reply was lost", and no amount of waiting separates those,
+     * because the answer could always still be in flight. That is the Two
+     * Generals' Problem, proved impossible, so the duplicate request is
+     * <b>guaranteed</b> rather than rare.
+     *
+     * <p><b>What makes this build different from the monolith is who sends the
+     * duplicate.</b> There it is the user pressing the button twice. Here there
+     * are three sources and two of them are nobody's decision:
+     *
+     * <ul>
+     *   <li>The <b>gateway</b> retries on timeout, and its read timeout does not
+     *       cancel the request still running behind it — so copy two is
+     *       dispatched while copy one is mid-insert.</li>
+     *   <li>A <b>load balancer</b> sends that copy to a <em>different
+     *       instance</em>, which shares no heap, no cache and no lock with the
+     *       first. Nothing in application memory can coordinate them.</li>
+     *   <li>And the client, as always.</li>
+     * </ul>
+     *
+     * <p>So idempotency here is not hardening added after the fact. The topology
+     * manufactures the duplicates, and the database is the only place the
+     * instances can agree — which is the same argument V4 made for the version
+     * column against {@code synchronized}.
+     *
+     * <p>Without a key, {@code users.email UNIQUE} does stop the second row, and
+     * answers an honest retrying client "that email is taken" when the email is
+     * taken <em>by its own first attempt</em>. The constraint protects the data
+     * and lies to the user. The {@code Idempotency-Key} turns that 409 back into
+     * the original 201.
+     *
+     * <p><b>The key is optional</b>, which is a deliberate trade: requiring it
+     * would break every existing caller on the day it shipped, and a request
+     * without one behaves exactly as before — unprotected, which is the status
+     * quo rather than a regression.
+     *
+     * <p><b>A header, not a body field</b>, because it is metadata about the
+     * delivery rather than part of what is being created. Keeping it out of the
+     * body also keeps it out of the fingerprint, which must stay stable across
+     * retries.
+     *
+     * <p><b>Scoped by email, not by principal</b>, because signup is
+     * unauthenticated by definition. Weaker, and bounded: the worst a guessed
+     * key reveals is that a signup for that email was already attempted, which a
+     * plain duplicate signup reveals anyway.
      */
     @PostMapping
-    public ResponseEntity<UserResponse> create(@Valid @RequestBody CreateUserRequest request) {
+    public ResponseEntity<UserResponse> create(
+            @Valid @RequestBody CreateUserRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            return signup(request);
+        }
+
+        // The fingerprint covers the fields that define the request, not the
+        // raw bytes. Raw bytes would make two JSON documents differing only in
+        // whitespace or key order look like different requests — and a retry is
+        // usually a fresh call to the same serialising code, not a replay of
+        // the original buffer, so that would produce spurious 422s.
+        String fingerprintSource = request.email() + "|" + request.firstName()
+                + "|" + request.lastName() + "|" + request.password();
+
+        IdempotencyService.Outcome<ResponseEntity<UserResponse>> outcome =
+                idempotency.execute(
+                        request.email(),
+                        idempotencyKey,
+                        fingerprintSource,
+                        () -> {
+                            ResponseEntity<UserResponse> response = signup(request);
+                            return new IdempotencyService.ResponseCapture<>(
+                                    response, 201, write(response.getBody()));
+                        },
+                        failure -> failure instanceof DuplicateEmailException duplicate
+                                && duplicate.isFinal()
+                                ? new IdempotencyService.ResponseCapture<>(null, 409, null)
+                                : null);
+
+        if (!outcome.replayed()) {
+            return outcome.value();
+        }
+
+        // A replay returns the STORED status, not a freshly chosen one.
+        // Replaying a 201 as a 200 is a different answer, and a caller that
+        // branches on the status — which, between services, is most of them —
+        // would see the retry as a different outcome than the call it retries.
+        return ResponseEntity.status(outcome.replayedStatus())
+                .header("Idempotent-Replay", "true")
+                .body(read(outcome.replayedBody()));
+    }
+
+    /** The signup itself, unchanged from Day-05 and deliberately unaware of keys. */
+    private ResponseEntity<UserResponse> signup(CreateUserRequest request) {
         // Day-05: this method no longer builds the User.
         //
         // It used to call `new User(...)` and hand the result to
@@ -307,4 +442,21 @@ public class UserController {
     //  answers "what can this service return?", which is the first question
     //  anyone integrating with it will ask.
     // =================================================================
+
+    /**
+     * Renders a response body for storage. <b>Day-11.</b>
+     *
+     * <p>No try/catch: Jackson 3's {@code JacksonException} is unchecked.
+     * Letting it escape is also correct — an exception here leaves the key
+     * unsettled, so the service releases it and the client can retry, rather
+     * than being handed a key it can never use again.
+     */
+    private String write(UserResponse body) {
+        return json.writeValueAsString(body);
+    }
+
+    /** Reads a stored response body back for replay. <b>Day-11.</b> */
+    private UserResponse read(String body) {
+        return body == null ? null : json.readValue(body, UserResponse.class);
+    }
 }
