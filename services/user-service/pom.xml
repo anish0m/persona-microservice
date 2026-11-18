@@ -35,6 +35,43 @@
         </dependency>
 
         <!--
+          Day-12, piece 1 of 2. THE ABSTRACTION.
+
+          Supplies @Cacheable/@CacheEvict and the proxy that makes them mean
+          anything. On its own it configures a ConcurrentHashMap cache manager
+          — in-process and per-instance, which in THIS architecture is not a
+          future problem but a present one: see CacheConfig for why a service
+          that is expected to scale horizontally cannot use a local cache.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+
+        <!--
+          Day-12, piece 2 of 2. THE SHARED STORE.
+
+          Brings Lettuce and Spring Data Redis, and its auto-configuration
+          replaces the map above with a RedisCacheManager. Two dependencies,
+          one feature, failing in opposite directions: without -cache the
+          annotations are inert metadata; without -data-redis they work
+          against the wrong kind of cache.
+
+          A NOTE THAT ONLY APPLIES TO THIS ARCHITECTURE: this dependency
+          belongs to user-service, not to the parent pom. Each service owns
+          its own cache the way it owns its own database — the whole point of
+          the split — and a shared Redis for all services would reintroduce
+          exactly the coupling that separate schemas were created to remove.
+          Two services caching into one Redis is one key space with two
+          writers and no agreed naming; the prefix in application.properties
+          is what keeps that honest if it ever happens.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!--
           Day-05. Bean validation (Hibernate Validator) for @NotBlank / @Email /
           @Size on the request DTOs.
 

@@ -3,11 +3,25 @@ package com.persona.user.service;
 import com.persona.user.dto.CreateUserRequest;
 import com.persona.user.dto.LoginRequest;
 import com.persona.user.dto.UpdateProfileRequest;
+// Day-12. A service method returning a DTO, which is worth a word because
+// this class's own javadoc insists it must not know a web layer exists.
+//
+// It does not. UserResponse is a plain record with no Spring, Jackson or
+// servlet type in it — the same category as CreateUserRequest and
+// UpdateProfileRequest, which this class has taken as PARAMETERS since
+// Day-05 for the reasons register() documents. The direction is new; the
+// dependency is not.
+//
+// The alternative was caching the entity, and that put a BCrypt hash into
+// Redis — see getProfile() for what the monolith's test actually printed.
+import com.persona.user.dto.UserResponse;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.InvalidCredentialsException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
 import com.persona.user.repository.UserRepository;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -90,7 +104,64 @@ public class UserService {
         // Default so that `new UserService(...)` in a plain unit test behaves
         // exactly as it did before Day-10 — see the field's javadoc.
         this.self = this;
+        // Day-12. Same reasoning, and the no-op is the honest default: a unit
+        // test with no application context has no cache to invalidate, so
+        // "publish nothing" is not a stub standing in for behaviour, it is
+        // the correct behaviour. Note this is why the publisher is NOT a
+        // constructor parameter — adding one would break the promise made
+        // above, that `new UserService(repository, encoder)` is a valid line
+        // in a plain JUnit test, and would force every existing unit test to
+        // pass an argument none of them care about.
+        this.events = event -> { };
     }
+
+    /**
+     * Announces committed profile changes so the cache can be invalidated.
+     * <b>Day-12.</b>
+     *
+     * <p>An event rather than a direct call into the cache, because the
+     * eviction must happen <b>after this method's transaction commits</b> and
+     * nothing inside the transaction can do that — see
+     * {@link ProfileCacheInvalidator} for why a {@code @CacheEvict} here
+     * would be silently wrong rather than merely imprecise.
+     *
+     * <p>It also keeps this class ignorant of caching, which is the same
+     * discipline as every other dependency here: {@code UserService} knows
+     * that a profile changed, not that a profile is cached. If Redis were
+     * removed tomorrow, nothing in this file would change — only the listener
+     * would be deleted.
+     *
+     * <p>In this architecture that indifference buys something specific. The
+     * publisher is an interface, and what subscribes to it is a deployment
+     * concern: an in-process listener today, and on Day-14 additionally a
+     * broker publisher telling other services to drop their copies. This
+     * method does not change on that day.
+     */
+    private ApplicationEventPublisher events;
+
+    /**
+     * Lets Spring supply the real publisher, with the same
+     * {@code required = false} as {@link #setSelf} so a unit-test instance
+     * stays valid with no context.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setEvents(ApplicationEventPublisher events) {
+        this.events = events;
+    }
+
+    /**
+     * The name of the one cache user-service has. <b>Day-12.</b>
+     *
+     * <p>A constant because it is referenced from three places that must
+     * agree — the {@code @Cacheable} on {@link #getProfile}, the eviction in
+     * {@link ProfileCacheInvalidator}, and the per-cache serializer in
+     * {@code CacheConfig} — and a typo between them produces no error at all.
+     * Spring creates a cache on first use, so evicting from {@code "user"}
+     * while caching into {@code "users"} would simply clear an empty cache
+     * forever, leaving stale profiles with nothing in the build or the logs to
+     * say why.
+     */
+    public static final String USERS_CACHE = "users";
 
     /**
      * This same bean, as seen through Spring's transactional proxy.
@@ -194,7 +265,45 @@ public class UserService {
      * been built first and the field set afterwards, there would be a window in
      * which a plaintext password is one {@code toString} or one exception away
      * from a log file.
+     *
+     * <h2>Why this method is {@code @Transactional}</h2>
+     *
+     * <p>Registration is look-then-act: a {@code findByEmail} read followed by
+     * an INSERT. The boundary means both see one consistent snapshot, and that
+     * any later step added to signup either happens with the user row or not
+     * at all. {@code @Transactional} is implemented by a <b>proxy</b> — Spring
+     * wraps this bean in a generated subclass that calls BEGIN before the
+     * method and COMMIT or ROLLBACK after — and the traps all follow from the
+     * proxy being on the outside: a self-invocation never crosses it, a
+     * {@code private} method is never proxied, Spring <b>commits</b> on a
+     * checked {@code Exception}, and catching an exception yourself means the
+     * proxy never sees it and commits anyway. <b>A rollback requires the
+     * exception to escape the method.</b>
+     *
+     * <h2>Day-12 — the annotation was MISSING here, and a cache test found it</h2>
+     *
+     * <p>This method had no boundary at all until Day-12, while the monolith's
+     * equivalent has had one since Day-05. The two architectures are supposed
+     * to differ in deployment, not in whether a signup is atomic, so this was
+     * a genuine gap in the mirror rather than a deliberate divergence.
+     *
+     * <p><b>How it surfaced is the useful part.</b> Nothing about signup failed
+     * — the INSERT is a single statement, so there was no visible symptom to
+     * chase. What broke was {@code UserCacheIT}, intermittently, roughly one
+     * run in five, on a completely different assertion: a profile update's
+     * post-commit eviction appeared not to happen. The cause was that
+     * {@code setUp} calls this method, and without a transaction its write
+     * committed on its own schedule rather than inside a boundary the test
+     * controlled, so the subsequent update's {@code AFTER_COMMIT} listener
+     * raced against it.
+     *
+     * <p>Which is worth keeping: <b>a missing transaction does not announce
+     * itself at the statement that lacks one.</b> It shows up later, in another
+     * test, as a timing-dependent failure in code that is correct. The same
+     * lesson as the eviction phase itself — an operation placed outside a
+     * boundary is silently wrong, not broken.
      */
+    @Transactional
     public User register(CreateUserRequest request) {
         if (repository.findByEmail(request.email()).isPresent()) {
             throw new DuplicateEmailException(request.email());
@@ -343,7 +452,29 @@ public class UserService {
         // checking already scheduled the write. Under JDBC it issues a real
         // three-column UPDATE. Correct under both, which is the property that
         // has kept this class unchanged since Day-01.
-        return repository.update(user);
+        User updated = repository.update(user);
+
+        // Day-12. Announce the change INSIDE the transaction; the listener
+        // runs after it commits.
+        //
+        // Publishing here rather than in updateProfile() after the retry loop
+        // is what makes the eviction exact. A @TransactionalEventListener
+        // holds this event until the surrounding transaction commits and
+        // DISCARDS it if that transaction rolls back — so the two attempts
+        // that lose an optimistic-locking race publish nothing, and the one
+        // that commits publishes once. One commit, one eviction, with no code
+        // here counting attempts.
+        //
+        // Note this is a method call with no visible effect on the next line,
+        // which is exactly the kind of statement that gets "tidied away" by
+        // someone who cannot see what consumes it. What it causes is a DEL in
+        // Redis roughly a millisecond from now; deleting this line leaves a
+        // stale profile served for the full TTL, with every test still green
+        // because nothing in the build reads through the cache. UserCacheIT
+        // asserts on it for that reason.
+        events.publishEvent(new ProfileChangedEvent(email));
+
+        return updated;
     }
 
     /**
@@ -412,9 +543,140 @@ public class UserService {
      * <p>For callers that cannot sensibly continue without the user — loading a
      * profile for a logged-in session, say. Forcing such a caller to unwrap an
      * {@code Optional} only makes it write an {@code if} it has no answer for.
+     *
+     * <h2>Day-12 — and this method is NOT the cached one</h2>
+     *
+     * <p>It was, briefly, and the monolith's integration test is the reason it
+     * is not. See {@link #getProfile} for what replaced it and why the
+     * difference is a security boundary rather than a refactor.
      */
     public User getByEmail(String email) {
         return repository.getByEmail(email);
+    }
+
+    /**
+     * A user's profile, as the API exposes it, cached. <b>Day-12.</b>
+     *
+     * <p>This method exists because {@code @Cacheable} was first put on
+     * {@link #getByEmail}, and that was wrong in two independent ways that the
+     * integration test surfaced within a minute of each other.
+     *
+     * <h2>1. It wrote a password hash into Redis</h2>
+     *
+     * <p>Caching a {@link User} serialises the entity, and the entity has a
+     * {@code passwordHash}. The test printed what was actually stored:
+     *
+     * <pre>
+     *   {"email":"...","firstName":"Ada",
+     *    "passwordHash":"$2a$10$jnh0ADlWhT7xE9H55Z0RJ...",
+     *    "createdAt":"...","id":972,...}
+     * </pre>
+     *
+     * <p>Every BCrypt hash for every user who had been read, sitting in an
+     * unauthenticated Redis, in plain text, for the TTL. Nothing failed — this
+     * was a <em>passing</em> cache doing exactly what it was told.
+     *
+     * <p><b>{@link UserResponse}'s own javadoc had already made this
+     * argument.</b> It exists because Jackson serialises a {@code User} by
+     * calling its getters and {@code getPasswordHash()} is a getter, so the
+     * password is excluded "the only way that actually holds: it is not a
+     * field of this record". Redis is a second wire, reached by a second
+     * serializer, and the rule generalises without amendment: <b>anything
+     * serialised out of this process must be shaped by a DTO, not by the
+     * entity.</b> An HTTP response was the only such wire until today.
+     *
+     * <p>In this architecture that rule has a second edge. A shared cache is
+     * readable by whatever else holds its credentials, so a cached document is
+     * closer to a published payload than to a private field — and a hash
+     * stored there has left this service's boundary without anyone writing an
+     * endpoint that exposes it.
+     *
+     * <h2>2. The entity could not survive the round trip anyway</h2>
+     *
+     * <p>The cached {@code User} came back as a {@code LinkedHashMap} and the
+     * proxy threw {@code ClassCastException} on the second read. The stored
+     * JSON carries no {@code @class} property, because the injected
+     * {@code ObjectMapper} is the application's — the one that renders HTTP
+     * responses, which must never emit type hints into its payloads. Without
+     * one, Jackson has nothing to reconstruct the type from.
+     *
+     * <p>The usual answer is to enable default typing on a private mapper for
+     * the cache. That buys back the entity and brings the deserialization
+     * attack surface described on {@code CacheConfig} with it. A {@code record}
+     * read by a type-bound serializer needs none of it: the target type comes
+     * from configuration, so the document stays plain data.
+     *
+     * <p><b>Both problems had the same fix, which is the useful part.</b>
+     * Caching the DTO removes the hash and removes the need for a type hint at
+     * once, and neither was a trade — the entity's extra fields were not
+     * wanted and its managed-ness does not survive serialisation regardless.
+     * The honest summary is that {@code getByEmail} returns an <em>entity</em>,
+     * and an entity is a database-shaped object; a cache is a wire, and wires
+     * carry DTOs.
+     *
+     * <h2>What the cache buys, and why this value deserves one</h2>
+     *
+     * <p>This serves {@code GET /users/me} and {@code GET /users/{email}} — a
+     * profile is read on essentially every authenticated page view and written
+     * when somebody edits their name, which they may do once and may never do.
+     * That ratio is the whole case for a cache, and it is a property of this
+     * value rather than of the service.
+     *
+     * <p><b>What a hit buys is skipped work, not faster storage.</b> The naive
+     * framing is "RAM beats disk" and it is weak: PostgreSQL has this row in
+     * its own buffer cache too, so the honest comparison is roughly 0.25ms
+     * against 1ms. The real saving is everything a query does <em>around</em>
+     * the read — parse the SQL, plan it, take a snapshot, check tuple
+     * visibility, walk the index, build the result set, serialise it over a
+     * socket, and hold a pooled connection while doing so. <b>The connection
+     * is usually scarcer than the millisecond</b>, and a service sized for its
+     * own pool feels that before it feels latency.
+     *
+     * <p><b>{@code key = "#email"} rather than the default.</b> The default key
+     * for a single-argument method is that argument, so this is what would
+     * happen anyway — written out because the default stops being right the
+     * moment a second parameter appears, and a key that silently absorbs a new
+     * argument caches the same profile under several keys, each invalidated
+     * independently. Naming it makes adding a parameter a visible decision.
+     *
+     * <h2>What this cache does NOT save — measured, not assumed</h2>
+     *
+     * <p>Verified against the running application by counting the SQL in the
+     * log, and the number is not the one the reasoning above predicts:
+     *
+     * <pre>
+     *   GET /users/me, cache cold    2 queries
+     *   GET /users/me, cache warm    1 query
+     *   GET /users/me, again         1 query
+     * </pre>
+     *
+     * <p>One query survives every hit, and it is not this method's. The JWT
+     * filter authenticates each request by calling
+     * {@code repository.findByEmail} directly — it needs the user's role
+     * before any controller runs — so it bypasses the service entirely and is
+     * not covered by any {@code @Cacheable}. <b>An authenticated profile read
+     * therefore halves its queries rather than eliminating them.</b>
+     *
+     * <p>Worth keeping for two reasons. The honest claim about a cache is the
+     * one you measured, and "the read is now free" would have been wrong by a
+     * factor of two. And the uncached lookup is the one on the <em>hottest</em>
+     * path in the service: every authenticated request pays it, not just
+     * profile reads. Caching it is a bigger win than this method and a worse
+     * idea today — a cached authorization decision is stale authorization, so
+     * a revoked role would keep working until the TTL. That is the kind of
+     * value whose staleness is measured in security rather than in
+     * inconvenience, and it needs a shorter TTL and its own argument rather
+     * than inheriting this one.
+     *
+     * <p><b>No {@code @CacheEvict} appears anywhere in this class.</b> The
+     * eviction is published as an event and performed after commit — see
+     * {@link ProfileCacheInvalidator}, which exists entirely because the
+     * annotation would fire inside the transaction and open a race whose
+     * consequences last for the full TTL.
+     */
+    @Cacheable(cacheNames = USERS_CACHE, key = "#email")
+    public UserResponse getProfile(String email) {
+        return UserResponse.from(repository.getByEmail(email));
     }
 
     /**
@@ -425,9 +687,36 @@ public class UserService {
      * deletion grows a rule — refuse while a balance is outstanding, archive before
      * removing, emit an event — that rule has an obvious home. A layer that is
      * only added once it is needed tends to get skipped exactly when it is.
+     *
+     * <h2>Day-12 — why this one is {@code @Transactional}</h2>
+     *
+     * <p>It was not, and did not need to be: a single DELETE is atomic by
+     * itself. The annotation is here for the <em>event</em>. A
+     * {@code @TransactionalEventListener} with no transaction to attach to
+     * does not fail and does not fall back — <b>it silently does not run.</b>
+     * The eviction would simply never happen, the deleted user's profile would
+     * be served from the cache for the full TTL, and nothing anywhere would
+     * report it.
+     *
+     * <p>That is a worse failure than a stale name, because the cached row no
+     * longer exists: a deleted account would keep answering
+     * {@code GET /users/{email}} with 200 and a full profile for ten minutes
+     * after it was deleted. Worth noting that {@code cache-null-values} does
+     * not save this — it caches a lookup that found nothing, and this lookup
+     * previously found something.
+     *
+     * <p>The alternative is publishing unconditionally outside a transaction
+     * with a plain {@code @EventListener}, which evicts immediately — and would
+     * then evict even when the delete goes on to fail, and would reopen the
+     * before-commit race the moment a second statement is added here. One
+     * transactional boundary and one listener for both write paths is the shape
+     * that stays correct as this method grows the rules its javadoc
+     * anticipates.
      */
+    @Transactional
     public void deleteByEmail(String email) {
         repository.deleteByEmail(email);
+        events.publishEvent(new ProfileChangedEvent(email));
     }
 
     /**

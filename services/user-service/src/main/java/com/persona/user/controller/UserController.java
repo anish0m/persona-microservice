@@ -298,7 +298,17 @@ public class UserController {
      */
     @GetMapping("/me")
     public UserResponse me(java.security.Principal principal) {
-        return UserResponse.from(service.getByEmail(principal.getName()));
+        // Day-12. getProfile, not getByEmail + UserResponse.from.
+        //
+        // The two return the same JSON; this one is cached. The mapping moved
+        // INTO the service because the cache stores what that method returns,
+        // and a DTO is the only safe thing to store — caching the entity wrote
+        // every user's BCrypt hash into Redis. See UserService.getProfile.
+        //
+        // Note the translation this class exists to do has not moved: the
+        // service still answers in plain Java types and this method still
+        // decides that the answer is a 200 with a JSON body.
+        return service.getProfile(principal.getName());
     }
 
     /**
@@ -368,7 +378,13 @@ public class UserController {
      */
     @GetMapping("/{email}")
     public UserResponse findByEmail(@PathVariable String email) {
-        return UserResponse.from(service.getByEmail(email));
+        // Day-12. Cached, exactly as /users/me is, and under the SAME key —
+        // the email. Two endpoints, one cache entry: a user who reads their own
+        // profile warms the entry that this endpoint serves, and one eviction
+        // invalidates both. Keying on the endpoint instead would store the same
+        // profile twice and leave one copy stale after an update that only
+        // evicted the other.
+        return service.getProfile(email);
     }
 
     /**

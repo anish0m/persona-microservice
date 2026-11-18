@@ -2,6 +2,7 @@ package com.persona.user.controller;
 
 import com.persona.user.dto.CreateUserRequest;
 import com.persona.user.dto.UpdateProfileRequest;
+import com.persona.user.dto.UserResponse;
 import com.persona.user.exception.DuplicateEmailException;
 import com.persona.user.exception.UserNotFoundException;
 import com.persona.user.model.User;
@@ -376,7 +377,17 @@ class UserControllerTest {
 
     @Test
     void fetchingOneUserReturns200() throws Exception {
-        when(service.getByEmail("khi0ne@example.com")).thenReturn(anishom());
+        // Day-12: getProfile, not getByEmail. The controller now calls the
+        // cached method, which returns the DTO already mapped — see
+        // UserService.getProfile for why the mapping moved down a layer
+        // (caching the entity put every user's BCrypt hash into Redis).
+        //
+        // Note the $.password assertion below still earns its place, and for
+        // a stronger reason than before: UserResponse has no password field
+        // at all, so this is now asserting a property of a type rather than
+        // of a mapping step.
+        when(service.getProfile("khi0ne@example.com"))
+                .thenReturn(UserResponse.from(anishom()));
 
         mockMvc.perform(get("/users/khi0ne@example.com"))
                 .andExpect(status().isOk())
@@ -387,7 +398,7 @@ class UserControllerTest {
     /** A missing user is 404 — the exact opposite of the 409 case above. */
     @Test
     void fetchingAMissingUserReturns404() throws Exception {
-        when(service.getByEmail(anyString()))
+        when(service.getProfile(anyString()))
                 .thenThrow(new UserNotFoundException("nobody@example.com"));
 
         mockMvc.perform(get("/users/nobody@example.com"))
@@ -440,7 +451,7 @@ class UserControllerTest {
      */
     @Test
     void thereIsNoCountEndpoint() throws Exception {
-        when(service.getByEmail("count"))
+        when(service.getProfile("count"))
                 .thenThrow(new UserNotFoundException("count"));
 
         mockMvc.perform(get("/users/count"))
